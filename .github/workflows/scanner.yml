@@ -3,7 +3,7 @@ name: Vault Scanner
 on:
   schedule:
     - cron: '0 * * * *' # every hour
-  workflow_dispatch:     # allows manual runs from the GitHub UI
+  workflow_dispatch:
 
 jobs:
   run-scanner:
@@ -11,6 +11,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v3
+        with:
+          persist-credentials: false # disable default token
 
       - name: Setup Node.js
         uses: actions/setup-node@v3
@@ -26,14 +28,17 @@ jobs:
           RPC_URL: ${{ secrets.RPC_URL }}
 
       - name: Commit and push vault.json if it exists
+        env:
+          GITHUB_TOKEN: ${{ secrets.PERSONAL_ACCESS_TOKEN }}  # ← make sure this exists!
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git remote set-url origin https://x-access-token:${GITHUB_TOKEN}@github.com/${{ github.repository }}
           
           if [ -f "data/vault.json" ]; then
             git add data/vault.json
             git commit -m "Update vault.json" || echo "No changes to commit"
-            git push
+            git push origin main
           else
             echo "⚠️ No vault.json file to commit."
           fi
