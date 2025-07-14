@@ -16,5 +16,11 @@
     "tokenId": "3509844",
     "owner": "0xCfc4dAeE7d0A94653Bbb948FA502974ddB3B34A7",
     "burnedAt": "1752507269"
+  },
+  {
+    "nft": "0x03a520b32C04BF3bEEf7BEb72E919cf822Ed34f1",
+    "tokenId": "3524467",
+    "owner": "0xCfc4dAeE7d0A94653Bbb948FA502974ddB3B34A7",
+    "burnedAt": "1752507607"
   }
 ]
