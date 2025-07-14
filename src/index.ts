@@ -9,12 +9,14 @@ const __dirname = path.dirname(__filename);
 
 const provider = new ethers.JsonRpcProvider(process.env.RPC_URL);
 
+// === Contract addresses ===
 const INFERNO_CONTRACT = "0x3d1B6A171CF454DD5f62e49063310e33A8657E0e"; // your vault
 
 const inferno = new ethers.Contract(INFERNO_CONTRACT, LpInfernoABI, provider);
 
+// === Topics and interface
 const NFTBURNED_TOPIC = ethers.id("NFTBurned(address,address,uint256)");
-const START_BLOCK = 32724500; // approx 1–2 blocks before the first event in your screenshot
+const START_BLOCK = 32724500; // set this to your contract deployment block
 
 const iface = new ethers.Interface([
   "event NFTBurned(address owner, address collection, uint256 tokenId)",
@@ -22,12 +24,28 @@ const iface = new ethers.Interface([
 ]);
 
 async function scanBurnedNFTs() {
-  const logs = await provider.getLogs({
-    address: INFERNO_CONTRACT,
-    topics: [NFTBURNED_TOPIC],
-    fromBlock: START_BLOCK,
-    toBlock: "latest"
-  });
+  const endBlock = await provider.getBlockNumber();
+  const chunkSize = 50000;
+  const logs: ethers.Log[] = [];
+
+  for (let fromBlock = START_BLOCK; fromBlock <= endBlock; fromBlock += chunkSize) {
+    const toBlock = Math.min(fromBlock + chunkSize - 1, endBlock);
+
+    console.log(`🔍 Fetching logs from ${fromBlock} to ${toBlock}...`);
+
+    try {
+      const chunkLogs = await provider.getLogs({
+        address: INFERNO_CONTRACT,
+        topics: [NFTBURNED_TOPIC],
+        fromBlock,
+        toBlock
+      });
+
+      logs.push(...chunkLogs);
+    } catch (err) {
+      console.error(`❌ Failed log fetch from ${fromBlock} to ${toBlock}`, err);
+    }
+  }
 
   const tokens = [];
 
@@ -46,6 +64,7 @@ async function scanBurnedNFTs() {
 
       if (currentOwner.toLowerCase() === INFERNO_CONTRACT.toLowerCase()) {
         const burnedAt = await inferno.burnedAt(collection, tokenId);
+
         tokens.push({
           nft: collection,
           tokenId,
@@ -55,8 +74,8 @@ async function scanBurnedNFTs() {
 
         console.log(`✅ Token ${tokenId} from ${originalOwner} still in vault`);
       }
-    } catch (err) {
-      // skip if ownerOf fails
+    } catch {
+      // token might not exist anymore — skip
     }
   }
 
