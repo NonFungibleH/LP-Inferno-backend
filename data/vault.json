@@ -1,3 +1,14 @@
-{
-  "status": "test success"
-}
+[
+  {
+    "nft": "0x03a520b32C04BF3bEEf7BEb72E919cf822Ed34f1",
+    "tokenId": "3509928",
+    "owner": "0xCfc4dAeE7d0A94653Bbb948FA502974ddB3B34A7",
+    "burnedAt": "1752238401"
+  },
+  {
+    "nft": "0x7C5f5A4bBd8fD63184577525326123B519429bDc",
+    "tokenId": "80697",
+    "owner": "0xCfc4dAeE7d0A94653Bbb948FA502974ddB3B34A7",
+    "burnedAt": "1752238445"
+  }
+]
