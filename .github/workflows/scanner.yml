@@ -12,7 +12,7 @@ jobs:
     steps:
       - uses: actions/checkout@v3
         with:
-          persist-credentials: false # disable default token
+          persist-credentials: false # disable default token so we use a PAT
 
       - name: Setup Node.js
         uses: actions/setup-node@v3
@@ -37,6 +37,7 @@ jobs:
           git remote set-url origin https://x-access-token:${GITHUB_TOKEN}@github.com/${{ github.repository }}
           
           if [ -f "data/vault.json" ]; then
+            git pull --rebase origin main
             git add data/vault.json
             git commit -m "Update vault.json" || echo "No changes to commit"
             git push origin main || echo "⚠️ Git push failed"
