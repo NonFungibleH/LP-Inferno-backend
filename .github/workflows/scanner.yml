@@ -5,6 +5,9 @@ on:
     - cron: '0 * * * *' # every hour
   workflow_dispatch:     # allows manual runs from the GitHub UI
 
+permissions:
+  contents: write  # ✅ Allow GitHub Action to push changes to the repo
+
 jobs:
   run-scanner:
     runs-on: ubuntu-latest
@@ -24,3 +27,9 @@ jobs:
         run: npx tsx src/index.ts
         env:
           RPC_URL: ${{ secrets.RPC_URL }}
+
+      - name: Commit and push vault.json
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/vault.json
