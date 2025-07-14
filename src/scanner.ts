@@ -1,36 +1,44 @@
-
 import { ethers } from "ethers";
 import fs from "fs";
-import InfernoABI from "../abis/LpInfernoABI.json" assert { type: "json" };
-import PositionManagerABI from "../abis/UniswapV3PositionManager.json" assert { type: "json" };
 
 const VAULT = "0x3d1B6A171CF454DD5f62e49063310e33A8657E0e";
+
+const ABI_BASE_URL = "https://raw.githubusercontent.com/YOUR_USERNAME/YOUR_FRONTEND_REPO/main";
 
 const MANAGERS = [
   {
     name: "V3",
     address: "0xC36442b4a4522E871399CD717aBDD847Ab11FE88",
-    abi: PositionManagerABI
+    abiUrl: `${ABI_BASE_URL}/components/abis/UniswapV3PositionManager.json`
   },
   {
     name: "V4",
     address: "0x7C5f5A4bBd8fD63184577525326123B519429bDc",
-    abi: PositionManagerABI
+    abiUrl: `${ABI_BASE_URL}/components/abis/UniswapV3PositionManager.json`
   },
   {
     name: "V3_CUSTOM",
     address: "0x03a520b32C04BF3bEEf7bEb72e919cF822Ed34f1",
-    abi: PositionManagerABI
+    abiUrl: `${ABI_BASE_URL}/components/abis/UniswapV3PositionManager.json`
   }
 ];
+
+const fetchAbi = async (url: string) => {
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`Failed to fetch ABI from ${url}`);
+  return res.json();
+};
 
 export async function scanVault() {
   const provider = new ethers.JsonRpcProvider(process.env.RPC_URL);
   const data: any[] = [];
 
+  const infernoAbi = await fetchAbi(`${ABI_BASE_URL}/app/abis/LpInfernoABI.json`);
+  const inferno = new ethers.Contract(VAULT, infernoAbi, provider);
+
   for (const manager of MANAGERS) {
-    const pm = new ethers.Contract(manager.address, manager.abi, provider);
-    const inferno = new ethers.Contract(VAULT, InfernoABI, provider);
+    const pmAbi = await fetchAbi(manager.abiUrl);
+    const pm = new ethers.Contract(manager.address, pmAbi, provider);
 
     for (let id = 1; id <= 2000; id++) {
       try {
