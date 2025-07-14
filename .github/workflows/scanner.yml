@@ -12,7 +12,7 @@ jobs:
     steps:
       - uses: actions/checkout@v3
         with:
-          persist-credentials: false # disable default token
+          persist-credentials: false # disable default token so we use our custom PAT
 
       - name: Setup Node.js
         uses: actions/setup-node@v3
@@ -29,16 +29,17 @@ jobs:
 
       - name: Commit and push vault.json if it exists
         env:
-          GITHUB_TOKEN: ${{ secrets.PERSONAL_ACCESS_TOKEN }}  # ← make sure this exists!
+          GITHUB_TOKEN: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git config --global --add safe.directory /github/workspace
           git remote set-url origin https://x-access-token:${GITHUB_TOKEN}@github.com/${{ github.repository }}
           
           if [ -f "data/vault.json" ]; then
             git add data/vault.json
             git commit -m "Update vault.json" || echo "No changes to commit"
-            git push origin main
+            git push origin main || echo "⚠️ Git push failed"
           else
             echo "⚠️ No vault.json file to commit."
           fi
