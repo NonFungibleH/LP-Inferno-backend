@@ -1,0 +1,26 @@
+name: Vault Scanner
+
+on:
+  schedule:
+    - cron: '0 * * * *' # every hour
+  workflow_dispatch:     # allows manual runs from the GitHub UI
+
+jobs:
+  run-scanner:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: 18
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Run scanner
+        run: npx tsx src/index.ts
+        env:
+          RPC_URL: ${{ secrets.RPC_URL }}
