@@ -1,4 +1,3 @@
-// src/index.ts
 import { ethers } from "ethers";
 import fs from "fs";
 import path from "path";
@@ -79,7 +78,18 @@ async function scanChain(chainName: string, rpcUrl: string) {
         const pair = `${sym0}/${sym1}`;
         const project = ignoreSymbols.includes(sym0) ? sym1 : sym0;
 
-        vaultEntries.push({ type: "v2", token, token0, token1, pair, project, sender, txHash, timestamp, chain: chainName });
+        vaultEntries.push({
+          type: "v2",
+          token,
+          token0,
+          token1,
+          pair,
+          project,
+          sender,
+          txHash,
+          timestamp,
+          chain: chainName
+        });
 
       } else if (log.topics[0] === NFTBurnedTopic) {
         const sender = "0x" + log.topics[1].slice(26);
@@ -94,7 +104,19 @@ async function scanChain(chainName: string, rpcUrl: string) {
 
         const type = manager.toLowerCase() === V4_MANAGER.toLowerCase() ? "v4" : "v3";
 
-        vaultEntries.push({ type, tokenId, manager, token0, token1, pair, project, sender, txHash, timestamp, chain: chainName });
+        vaultEntries.push({
+          type,
+          tokenId,
+          manager,
+          token0,
+          token1,
+          pair,
+          project,
+          sender,
+          txHash,
+          timestamp,
+          chain: chainName
+        });
       }
     }
   }
