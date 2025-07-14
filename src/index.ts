@@ -4,60 +4,67 @@ import path from "path";
 import { fileURLToPath } from "url";
 import LpInfernoABI from "../abis/LpInfernoABI.json" assert { type: "json" };
 
-// === Setup paths ===
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// === RPC provider ===
 const provider = new ethers.JsonRpcProvider(process.env.RPC_URL);
 
-// === Contracts ===
-const INFERNO_CONTRACT = "0x3d1B6A171CF454DD5f62e49063310e33A8657E0e"; // Your LP Inferno contract
-const V3_MANAGER = "0xC36442b4a4522E871399CD717aBDD847Ab11FE88";   // Uniswap V3 NFT Manager
+const INFERNO_CONTRACT = "0x3d1B6A171CF454DD5f62e49063310e33A8657E0e"; // your vault
 
 const inferno = new ethers.Contract(INFERNO_CONTRACT, LpInfernoABI, provider);
 
-// === Scanner ===
-async function scanVaultByOwnership() {
+const NFTBURNED_TOPIC = ethers.id("NFTBurned(address,address,uint256)");
+const START_BLOCK = 32724500; // approx 1–2 blocks before the first event in your screenshot
+
+const iface = new ethers.Interface([
+  "event NFTBurned(address owner, address collection, uint256 tokenId)",
+  "function ownerOf(uint256) view returns (address)"
+]);
+
+async function scanBurnedNFTs() {
+  const logs = await provider.getLogs({
+    address: INFERNO_CONTRACT,
+    topics: [NFTBURNED_TOPIC],
+    fromBlock: START_BLOCK,
+    toBlock: "latest"
+  });
+
   const tokens = [];
-  const MAX_TOKEN_ID = 10000; // You can increase this later
 
-  const iface = new ethers.Interface([
-    "function ownerOf(uint256) view returns (address)"
-  ]);
+  for (const log of logs) {
+    const parsed = iface.parseLog(log);
+    const collection = parsed.args.collection;
+    const tokenId = parsed.args.tokenId.toString();
+    const originalOwner = parsed.args.owner;
 
-  for (let tokenId = 0; tokenId <= MAX_TOKEN_ID; tokenId++) {
     try {
-      const data = iface.encodeFunctionData("ownerOf", [tokenId]);
-      const result = await provider.call({ to: V3_MANAGER, data });
-      const currentOwner = ethers.AbiCoder.defaultAbiCoder().decode(["address"], result)[0];
+      const nft = new ethers.Contract(collection, [
+        "function ownerOf(uint256) view returns (address)"
+      ], provider);
+
+      const currentOwner = await nft.ownerOf(tokenId);
 
       if (currentOwner.toLowerCase() === INFERNO_CONTRACT.toLowerCase()) {
-        const originalOwner = await inferno.originalOwner(V3_MANAGER, tokenId);
-        const burnedAt = await inferno.burnedAt(V3_MANAGER, tokenId);
-
+        const burnedAt = await inferno.burnedAt(collection, tokenId);
         tokens.push({
-          nft: V3_MANAGER,
-          tokenId: tokenId.toString(),
+          nft: collection,
+          tokenId,
           owner: originalOwner,
           burnedAt: burnedAt.toString()
         });
 
-        console.log(`✅ Token ${tokenId} from ${originalOwner}`);
+        console.log(`✅ Token ${tokenId} from ${originalOwner} still in vault`);
       }
     } catch (err) {
-      // Skip invalid tokens
-    }
-
-    if (tokenId % 1000 === 0) {
-      console.log(`Scanned up to token ${tokenId}`);
+      // skip if ownerOf fails
     }
   }
 
   const outputPath = path.join(__dirname, "../data/vault.json");
   fs.mkdirSync(path.dirname(outputPath), { recursive: true });
   fs.writeFileSync(outputPath, JSON.stringify(tokens, null, 2));
-  console.log(`✅ Done: ${tokens.length} tokens written to vault.json`);
+
+  console.log(`✅ Scan complete. ${tokens.length} tokens written to vault.json`);
 }
 
-scanVaultByOwnership();
+scanBurnedNFTs();
