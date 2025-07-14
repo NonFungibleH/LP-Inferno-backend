@@ -3,7 +3,7 @@ import fs from "fs";
 
 const VAULT = "0x3d1B6A171CF454DD5f62e49063310e33A8657E0e";
 
-const ABI_BASE_URL = "https://raw.githubusercontent.com/YOUR_USERNAME/YOUR_FRONTEND_REPO/main";
+const ABI_BASE_URL = "https://raw.githubusercontent.com/NonFungibleH/LP-Inferno/main";
 
 const MANAGERS = [
   {
