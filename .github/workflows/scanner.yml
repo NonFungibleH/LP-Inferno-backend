@@ -5,9 +5,6 @@ on:
     - cron: '0 * * * *' # every hour
   workflow_dispatch:     # allows manual runs from the GitHub UI
 
-permissions:
-  contents: write  # ✅ Allow GitHub Action to push changes to the repo
-
 jobs:
   run-scanner:
     runs-on: ubuntu-latest
@@ -28,8 +25,15 @@ jobs:
         env:
           RPC_URL: ${{ secrets.RPC_URL }}
 
-      - name: Commit and push vault.json
+      - name: Commit and push vault.json if it exists
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add data/vault.json
+          
+          if [ -f "data/vault.json" ]; then
+            git add data/vault.json
+            git commit -m "Update vault.json" || echo "No changes to commit"
+            git push
+          else
+            echo "⚠️ No vault.json file to commit."
+          fi
