@@ -16,10 +16,10 @@ const inferno = new ethers.Contract(INFERNO_CONTRACT, LpInfernoABI, provider);
 
 // === Topics and interface
 const NFTBURNED_TOPIC = ethers.id("NFTBurned(address,address,uint256)");
-const START_BLOCK = 32724500; // set this to your contract deployment block
+const START_BLOCK = 32724500; // approx deploy block
 
 const iface = new ethers.Interface([
-  "event NFTBurned(address indexed owner, address collection, uint256 tokenId)",
+  "event NFTBurned(address indexed owner, address indexed collection, uint256 tokenId)",
   "function ownerOf(uint256) view returns (address)"
 ]);
 
@@ -30,7 +30,6 @@ async function scanBurnedNFTs() {
 
   for (let fromBlock = START_BLOCK; fromBlock <= endBlock; fromBlock += chunkSize) {
     const toBlock = Math.min(fromBlock + chunkSize - 1, endBlock);
-
     console.log(`🔍 Fetching logs from ${fromBlock} to ${toBlock}...`);
 
     try {
@@ -50,7 +49,14 @@ async function scanBurnedNFTs() {
   const tokens = [];
 
   for (const log of logs) {
-    const parsed = iface.parseLog(log);
+    let parsed;
+    try {
+      parsed = iface.parseLog(log);
+    } catch (err) {
+      console.warn(`⚠️ Skipping malformed log at block ${log.blockNumber}`);
+      continue;
+    }
+
     const collection = parsed.args.collection;
     const tokenId = parsed.args.tokenId.toString();
     const originalOwner = parsed.args.owner;
@@ -75,7 +81,7 @@ async function scanBurnedNFTs() {
         console.log(`✅ Token ${tokenId} from ${originalOwner} still in vault`);
       }
     } catch {
-      // token might not exist anymore — skip
+      // token likely burned or transferred — skip
     }
   }
 
