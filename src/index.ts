@@ -19,7 +19,7 @@ const NFTBURNED_TOPIC = ethers.id("NFTBurned(address,address,uint256)");
 const START_BLOCK = 32724500; // set this to your contract deployment block
 
 const iface = new ethers.Interface([
-  "event NFTBurned(address owner, address collection, uint256 tokenId)",
+  "event NFTBurned(address indexed owner, address indexed collection, uint256 indexed tokenId)",
   "function ownerOf(uint256) view returns (address)"
 ]);
 
