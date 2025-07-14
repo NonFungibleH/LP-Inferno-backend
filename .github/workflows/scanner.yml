@@ -12,7 +12,7 @@ const START_BLOCK = 32724500;
 const CHAINS = [
   {
     name: "base",
-    rpc: process.env.BASE_RPC,
+    rpc: process.env.BASE_RPC || "",
     explorer: "https://basescan.org/tx/"
   }
 ];
