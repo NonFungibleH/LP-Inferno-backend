@@ -28,12 +28,11 @@ jobs:
         env:
           BASE_RPC: ${{ secrets.BASE_RPC }}
 
-      - name: Commit and push vault.json if it exists
-        env:
-          GITHUB_TOKEN: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
+     - name: Commit and push vault.json if it exists
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git remote set-url origin https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}
           git add data/vault.json || echo "No changes to commit"
           git commit -m "Update vault.json" || echo "Nothing to commit"
-          git push
+          git push origin HEAD
