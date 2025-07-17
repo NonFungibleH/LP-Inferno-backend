@@ -1,26 +1,66 @@
 [
   {
-    "nft": "0x03a520b32C04BF3bEEf7BEb72E919cf822Ed34f1",
+    "type": "v3",
     "tokenId": "3509928",
-    "owner": "0xCfc4dAeE7d0A94653Bbb948FA502974ddB3B34A7",
-    "burnedAt": "1752238401"
+    "manager": "0x03a520b32c04bf3beef7beb72e919cf822ed34f1",
+    "token0": "0x34Ad08999B1253e9457d041120E2ddaD6FE50d75",
+    "token1": "0x4200000000000000000000000000000000000006",
+    "pair": "GROW/WETH",
+    "project": "GROW",
+    "sender": "0xcfc4daee7d0a94653bbb948fa502974ddb3b34a7",
+    "txHash": "0x1306ee552aff1ba2393b47c5049f29b2fbbca0828b8f3ffbd7dd7e206075e5d8",
+    "timestamp": 1752238401,
+    "chain": "base"
   },
   {
-    "nft": "0x7C5f5A4bBd8fD63184577525326123B519429bDc",
+    "type": "v4",
     "tokenId": "80697",
-    "owner": "0xCfc4dAeE7d0A94653Bbb948FA502974ddB3B34A7",
-    "burnedAt": "1752238445"
+    "manager": "0x7c5f5a4bbd8fd63184577525326123b519429bdc",
+    "token0": "0x",
+    "token1": "0x",
+    "pair": "???/???",
+    "project": "???",
+    "sender": "0xcfc4daee7d0a94653bbb948fa502974ddb3b34a7",
+    "txHash": "0x953297059eb3570dd66ab92a4e299949613aaaf61b1396dbf18b77ea23f3f8e9",
+    "timestamp": 1752238445,
+    "chain": "base"
   },
   {
-    "nft": "0x03a520b32C04BF3bEEf7BEb72E919cf822Ed34f1",
+    "type": "v2",
+    "token": "0x1295e6101db4606f8c6aa4b490c1c90c28e12104",
+    "token0": "0x34Ad08999B1253e9457d041120E2ddaD6FE50d75",
+    "token1": "0x4200000000000000000000000000000000000006",
+    "pair": "GROW/WETH",
+    "project": "GROW",
+    "sender": "0xcfc4daee7d0a94653bbb948fa502974ddb3b34a7",
+    "txHash": "0x8cfbe611857d78c4eee19ad76190b95dd25e7332f71d81abe178400be1ad957f",
+    "timestamp": 1752238485,
+    "chain": "base"
+  },
+  {
+    "type": "v3",
     "tokenId": "3509844",
-    "owner": "0xCfc4dAeE7d0A94653Bbb948FA502974ddB3B34A7",
-    "burnedAt": "1752507269"
+    "manager": "0x03a520b32c04bf3beef7beb72e919cf822ed34f1",
+    "token0": "0x34Ad08999B1253e9457d041120E2ddaD6FE50d75",
+    "token1": "0x4200000000000000000000000000000000000006",
+    "pair": "GROW/WETH",
+    "project": "GROW",
+    "sender": "0xcfc4daee7d0a94653bbb948fa502974ddb3b34a7",
+    "txHash": "0xc6acb8cf7edcb58df5c05f50f7a3557605b191b1b26c8e3be883430b6c94bd05",
+    "timestamp": 1752507269,
+    "chain": "base"
   },
   {
-    "nft": "0x03a520b32C04BF3bEEf7BEb72E919cf822Ed34f1",
+    "type": "v3",
     "tokenId": "3524467",
-    "owner": "0xCfc4dAeE7d0A94653Bbb948FA502974ddB3B34A7",
-    "burnedAt": "1752507607"
+    "manager": "0x03a520b32c04bf3beef7beb72e919cf822ed34f1",
+    "token0": "0x34Ad08999B1253e9457d041120E2ddaD6FE50d75",
+    "token1": "0x4200000000000000000000000000000000000006",
+    "pair": "GROW/WETH",
+    "project": "GROW",
+    "sender": "0xcfc4daee7d0a94653bbb948fa502974ddb3b34a7",
+    "txHash": "0xb3ac30a03de68a3e5648be8f851e6927301576505c9199be28622fed5e3d9db5",
+    "timestamp": 1752507607,
+    "chain": "base"
   }
 ]
