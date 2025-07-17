@@ -31,8 +31,42 @@ async function fetchTokenSymbol(address: string, provider: ethers.JsonRpcProvide
 }
 
 async function fetchPositionTokens(manager: string, tokenId: string, provider: ethers.JsonRpcProvider) {
-  const abi = ["function positions(uint256) view returns (uint96 nonce, address operator, address token0, address token1, uint24 fee, int24 tickLower, int24 tickUpper, uint128 liquidity, uint256 feeGrowthInside0LastX128, uint256 feeGrowthInside1LastX128, uint128 tokensOwed0, uint128 tokensOwed1)"];
+  const isV4 = manager.toLowerCase() === V4_MANAGER.toLowerCase();
+
+  if (isV4) {
+    try {
+      const endBlock = await provider.getBlockNumber();
+      const logs = await provider.getLogs({
+        address: VAULT_ADDRESS,
+        fromBlock: endBlock - 5000,
+        toBlock: endBlock,
+        topics: [ethers.id("FeesClaimed(address,address,uint256,uint256,address,address)")]
+      });
+
+      for (const log of logs) {
+        const decoded = ethers.AbiCoder.defaultAbiCoder().decode(
+          ["address", "address", "uint256", "uint256", "address", "address"],
+          log.data
+        );
+
+        const [, nftAddress, tokenIdInEvent, , token0, token1] = decoded;
+
+        if (
+          tokenIdInEvent.toString() === tokenId.toString() &&
+          nftAddress.toLowerCase() === manager.toLowerCase()
+        ) {
+          return { token0, token1 };
+        }
+      }
+    } catch (err) {
+      console.warn("⚠️ Failed to extract V4 token0/token1 from logs:", err);
+    }
+
+    return { token0: "0x", token1: "0x" };
+  }
+
   try {
+    const abi = ["function positions(uint256) view returns (uint96 nonce, address operator, address token0, address token1, uint24 fee, int24 tickLower, int24 tickUpper, uint128 liquidity, uint256 feeGrowthInside0LastX128, uint256 feeGrowthInside1LastX128, uint128 tokensOwed0, uint128 tokensOwed1)"];
     const contract = new ethers.Contract(manager, abi, provider);
     const pos = await contract.positions(tokenId);
     return { token0: pos.token0, token1: pos.token1 };
@@ -139,4 +173,3 @@ async function runMultichainScan() {
 }
 
 runMultichainScan();
-
