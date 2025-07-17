@@ -31,11 +31,14 @@ jobs:
         env:
           BASE_RPC: ${{ secrets.BASE_RPC }}
 
-      - name: Commit and push vault.json if it exists
+      - name: Push vault.json to frontend repo
         run: |
-          git config --global user.name "github-actions[bot]"
-          git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          git remote set-url origin https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}
-          git add data/vault.json || echo "No changes to commit"
-          git commit -m "Update vault.json" || echo "Nothing to commit"
-          git push origin HEAD
+          git clone https://x-access-token:${{ secrets.FRONTEND_PAT }}@github.com/NonFungibleH/LP-Inferno.git
+          cd YOUR_FRONTEND_REPO
+          mkdir -p data
+          cp ../data/vault.json data/vault.json
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/vault.json
+          git commit -m "Update vault.json from backend scan" || echo "Nothing to commit"
+          git push origin main
