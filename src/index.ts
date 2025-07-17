@@ -1,3 +1,4 @@
+// src/index.ts
 import { ethers } from "ethers";
 import fs from "fs";
 import path from "path";
@@ -30,9 +31,7 @@ async function fetchTokenSymbol(address: string, provider: ethers.JsonRpcProvide
 }
 
 async function fetchPositionTokens(manager: string, tokenId: string, provider: ethers.JsonRpcProvider) {
-  const abi = [
-    "function positions(uint256) view returns (uint96 nonce, address operator, address token0, address token1, uint24 fee, int24 tickLower, int24 tickUpper, uint128 liquidity, uint256 feeGrowthInside0LastX128, uint256 feeGrowthInside1LastX128, uint128 tokensOwed0, uint128 tokensOwed1)"
-  ];
+  const abi = ["function positions(uint256) view returns (uint96 nonce, address operator, address token0, address token1, uint24 fee, int24 tickLower, int24 tickUpper, uint128 liquidity, uint256 feeGrowthInside0LastX128, uint256 feeGrowthInside1LastX128, uint128 tokensOwed0, uint128 tokensOwed1)"];
   try {
     const contract = new ethers.Contract(manager, abi, provider);
     const pos = await contract.positions(tokenId);
@@ -70,10 +69,7 @@ async function scanChain(chainName: string, rpcUrl: string) {
         const sender = "0x" + log.topics[1].slice(26);
         const token = "0x" + log.topics[2].slice(26);
 
-        const pairABI = [
-          "function token0() view returns (address)",
-          "function token1() view returns (address)"
-        ];
+        const pairABI = ["function token0() view returns (address)", "function token1() view returns (address)"];
         const lp = new ethers.Contract(token, pairABI, provider);
         const token0 = await lp.token0();
         const token1 = await lp.token1();
@@ -136,10 +132,11 @@ async function runMultichainScan() {
     allVaults = allVaults.concat(entries);
   }
 
-  const outputPath = path.join(__dirname, "../data/vault.json");
+  const outputPath = new URL("../data/vault.json", import.meta.url).pathname;
   fs.mkdirSync(path.dirname(outputPath), { recursive: true });
   fs.writeFileSync(outputPath, JSON.stringify(allVaults, null, 2));
   console.log(`✅ Saved ${allVaults.length} entries to vault.json`);
 }
 
 runMultichainScan();
+
