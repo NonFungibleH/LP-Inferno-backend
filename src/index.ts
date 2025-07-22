@@ -6,9 +6,11 @@ import dotenv from "dotenv";
 dotenv.config();
 
 const VAULT_ADDRESS = "0x9be6e6Ea828d5BE4aD1AD4b46d9f704B75052929";
-const V3_MANAGER = "0xC36442b4a4522E871399CD717aBDD847Ab11FE88";
-const V4_MANAGER = "0x7C5f5A4bBd8fD63184577525326123B519429bDc";
-const START_BLOCK = 32724500;
+const V3_MANAGER    = "0xC36442b4a4522E871399CD717aBDD847Ab11FE88";
+const V4_MANAGER    = "0x7C5f5A4bBd8fD63184577525326123B519429bDc";
+
+// ← set this to the block your new vault was deployed at!
+const START_BLOCK   = /* e.g. 33205000 */ 32724500;
 
 const CHAINS = [
   {
@@ -18,58 +20,62 @@ const CHAINS = [
   }
 ];
 
-const ignoreSymbols = ["USDC", "USDT", "DAI", "WETH", "ETH", "WBTC", "BNB", "MATIC"];
+const ignoreSymbols = ["USDC","USDT","DAI","WETH","ETH","WBTC","BNB","MATIC"];
 
 async function fetchTokenSymbol(address: string, provider: ethers.JsonRpcProvider) {
   const abi = ["function symbol() view returns (string)"];
   try {
-    const contract = new ethers.Contract(address, abi, provider);
-    return await contract.symbol();
+    return await new ethers.Contract(address, abi, provider).symbol();
   } catch {
     return "???";
   }
 }
 
-async function fetchPositionTokens(manager: string, tokenId: string, provider: ethers.JsonRpcProvider) {
+async function fetchPositionTokens(
+  manager: string,
+  tokenId: string,
+  provider: ethers.JsonRpcProvider
+) {
   const isV4 = manager.toLowerCase() === V4_MANAGER.toLowerCase();
 
   if (isV4) {
+    // extract token0/token1 from FeesClaimed logs
     try {
       const endBlock = await provider.getBlockNumber();
       const logs = await provider.getLogs({
         address: VAULT_ADDRESS,
         fromBlock: endBlock - 5000,
         toBlock: endBlock,
-        topics: [ethers.id("FeesClaimed(address,address,uint256,uint256,address,address)")]
+        topics: [
+          ethers.id("FeesClaimed(address,address,uint256,address,address,uint256,uint256)")
+        ]
       });
-
       for (const log of logs) {
-        const decoded = ethers.AbiCoder.defaultAbiCoder().decode(
-          ["address", "address", "uint256", "uint256", "address", "address"],
-          log.data
-        );
-
-        const [, nftAddress, tokenIdInEvent, , token0, token1] = decoded;
-
+        const [ , nftAddr, tokenIdInEvt, token0, token1 ] =
+          ethers.AbiCoder.defaultAbiCoder().decode(
+            ["address","address","uint256","address","address"],
+            log.data
+          );
         if (
-          tokenIdInEvent.toString() === tokenId.toString() &&
-          nftAddress.toLowerCase() === manager.toLowerCase()
+          tokenIdInEvt.toString() === tokenId &&
+          nftAddr.toLowerCase() === manager.toLowerCase()
         ) {
           return { token0, token1 };
         }
       }
-    } catch (err) {
-      console.warn("⚠️ Failed to extract V4 token0/token1 from logs:", err);
+    } catch (e) {
+      console.warn("⚠️ V4 token fetch error:", e);
     }
-
     return { token0: "0x", token1: "0x" };
   }
 
+  // V3: read positions()
   try {
-    const abi = ["function positions(uint256) view returns (uint96 nonce, address operator, address token0, address token1, uint24 fee, int24 tickLower, int24 tickUpper, uint128 liquidity, uint256 feeGrowthInside0LastX128, uint256 feeGrowthInside1LastX128, uint128 tokensOwed0, uint128 tokensOwed1)"];
-    const contract = new ethers.Contract(manager, abi, provider);
-    const pos = await contract.positions(tokenId);
-    return { token0: pos.token0, token1: pos.token1 };
+    const abi = [
+      "function positions(uint256) view returns (uint96,address,address,address,uint24,int24,int24,uint128,uint256,uint256,uint128,uint128)"
+    ];
+    const pos = await new ethers.Contract(manager, abi, provider).positions(tokenId);
+    return { token0: pos[2], token1: pos[3] };
   } catch {
     return { token0: "0x", token1: "0x" };
   }
@@ -78,11 +84,12 @@ async function fetchPositionTokens(manager: string, tokenId: string, provider: e
 async function scanChain(chainName: string, rpcUrl: string) {
   const provider = new ethers.JsonRpcProvider(rpcUrl);
   const endBlock = await provider.getBlockNumber();
-  const chunkSize = 50000;
+  const chunkSize = 50_000;
   const vaultEntries: any[] = [];
 
-  const ERC20BurnedTopic = ethers.id("ERC20Burned(address,address,uint256)");
-  const NFTBurnedTopic = ethers.id("NFTBurned(address,address,uint256)");
+  // **NEW** event signature for V2
+  const ERC20DepositedTopic = ethers.id("ERC20Deposited(address,address,uint256)");
+  const NFTBurnedTopic      = ethers.id("NFTBurned(address,address,uint256)");
 
   for (let fromBlock = START_BLOCK; fromBlock <= endBlock; fromBlock += chunkSize) {
     const toBlock = Math.min(endBlock, fromBlock + chunkSize);
@@ -95,26 +102,31 @@ async function scanChain(chainName: string, rpcUrl: string) {
     });
 
     for (const log of logs) {
-      const block = await provider.getBlock(log.blockNumber);
+      const block     = await provider.getBlock(log.blockNumber);
       const timestamp = Number(block.timestamp);
-      const txHash = log.transactionHash;
+      const txHash    = log.transactionHash;
 
-      if (log.topics[0] === ERC20BurnedTopic) {
+      // — V2 ERC20Deposited ——
+      if (log.topics[0] === ERC20DepositedTopic) {
         const sender = "0x" + log.topics[1].slice(26);
-        const token = "0x" + log.topics[2].slice(26);
+        const token  = "0x" + log.topics[2].slice(26);
 
-        const pairABI = ["function token0() view returns (address)", "function token1() view returns (address)"];
-        const lp = new ethers.Contract(token, pairABI, provider);
+        // fetch pair tokens
+        const pairABI = [
+          "function token0() view returns (address)",
+          "function token1() view returns (address)"
+        ];
+        const lp     = new ethers.Contract(token, pairABI, provider);
         const token0 = await lp.token0();
         const token1 = await lp.token1();
 
-        const sym0 = await fetchTokenSymbol(token0, provider);
-        const sym1 = await fetchTokenSymbol(token1, provider);
-        const pair = `${sym0}/${sym1}`;
-        const project = ignoreSymbols.includes(sym0) ? sym1 : sym0;
+        const sym0   = await fetchTokenSymbol(token0, provider);
+        const sym1   = await fetchTokenSymbol(token1, provider);
+        const pair   = `${sym0}/${sym1}`;
+        const project= ignoreSymbols.includes(sym0) ? sym1 : sym0;
 
         vaultEntries.push({
-          type: "v2",
+          type:     "v2",
           token,
           token0,
           token1,
@@ -123,21 +135,21 @@ async function scanChain(chainName: string, rpcUrl: string) {
           sender,
           txHash,
           timestamp,
-          chain: chainName
+          chain:    chainName
         });
 
+      // — V3/V4 NFTBurned ——
       } else if (log.topics[0] === NFTBurnedTopic) {
-        const sender = "0x" + log.topics[1].slice(26);
+        const sender  = "0x" + log.topics[1].slice(26);
         const manager = "0x" + log.topics[2].slice(26);
         const tokenId = ethers.toBigInt(log.data).toString();
 
         const { token0, token1 } = await fetchPositionTokens(manager, tokenId, provider);
-        const sym0 = await fetchTokenSymbol(token0, provider);
-        const sym1 = await fetchTokenSymbol(token1, provider);
-        const pair = `${sym0}/${sym1}`;
-        const project = ignoreSymbols.includes(sym0) ? sym1 : sym0;
-
-        const type = manager.toLowerCase() === V4_MANAGER.toLowerCase() ? "v4" : "v3";
+        const sym0     = await fetchTokenSymbol(token0, provider);
+        const sym1     = await fetchTokenSymbol(token1, provider);
+        const pair     = `${sym0}/${sym1}`;
+        const project  = ignoreSymbols.includes(sym0) ? sym1 : sym0;
+        const type     = manager.toLowerCase() === V4_MANAGER.toLowerCase() ? "v4" : "v3";
 
         vaultEntries.push({
           type,
@@ -150,7 +162,7 @@ async function scanChain(chainName: string, rpcUrl: string) {
           sender,
           txHash,
           timestamp,
-          chain: chainName
+          chain:   chainName
         });
       }
     }
@@ -172,4 +184,4 @@ async function runMultichainScan() {
   console.log(`✅ Saved ${allVaults.length} entries to vault.json`);
 }
 
-runMultichainScan();
+runMultichainScan().catch(console.error);
