@@ -1,7 +1,7 @@
 import { ethers } from "ethers";
 import fs from "fs";
 
-const VAULT = "0x3d1B6A171CF454DD5f62e49063310e33A8657E0e";
+const VAULT = "0x9be6e6Ea828d5BE4aD1AD4b46d9f704B75052929";
 
 const ABI_BASE_URL = "https://raw.githubusercontent.com/NonFungibleH/LP-Inferno/main";
 
