@@ -18,14 +18,22 @@ const ERC721_ABI = [
   "function positions(uint256 tokenId) view returns (uint96,address,address token0,address token1,uint24,int24,int24,uint128,uint256,uint256,uint128,uint128)"
 ];
 
-async function resolvePairSymbol(token0: string, token1: string): Promise<string> {
+async function getTokenSymbol(address: string): Promise<string> {
   const ERC20_ABI = ["function symbol() view returns (string)"];
   try {
-    const [c0, c1] = [
-      new ethers.Contract(token0, ERC20_ABI, provider),
-      new ethers.Contract(token1, ERC20_ABI, provider),
-    ];
-    const [sym0, sym1] = await Promise.all([c0.symbol(), c1.symbol()]);
+    const token = new ethers.Contract(address, ERC20_ABI, provider);
+    return await token.symbol();
+  } catch {
+    return address.slice(0, 6); // fallback: shorten address
+  }
+}
+
+async function resolvePairSymbol(token0: string, token1: string): Promise<string> {
+  try {
+    const [sym0, sym1] = await Promise.all([
+      getTokenSymbol(token0),
+      getTokenSymbol(token1),
+    ]);
     return `${sym0}/${sym1}`;
   } catch {
     return "???/???";
@@ -39,8 +47,11 @@ export async function scanVault() {
   // V2
   const depositFilter = inferno.filters.ERC20Deposited();
   const depositLogs = await inferno.queryFilter(depositFilter, fromBlock, "latest");
+
   for (const log of depositLogs) {
     const { user, token, amount } = inferno.interface.parseLog(log).args;
+    const pair = await resolvePairSymbol(token, "0x4200000000000000000000000000000000000006"); // assume WETH pair
+
     results.push({
       type: "V2",
       token: token.toLowerCase(),
@@ -48,7 +59,7 @@ export async function scanVault() {
       sender: user.toLowerCase(),
       tx: log.transactionHash,
       block: log.blockNumber,
-      pair: await resolvePairSymbol(token, "0x4200000000000000000000000000000000000006"), // assume WETH pair
+      pair,
     });
   }
 
@@ -70,7 +81,8 @@ export async function scanVault() {
         if (owner.toLowerCase() !== VAULT.toLowerCase()) continue;
 
         const pos = await pm.positions(tokenId);
-        const [token0, token1] = [pos.token0, pos.token1];
+        const token0 = pos.token0;
+        const token1 = pos.token1;
         const pair = await resolvePairSymbol(token0, token1);
         const sender = await inferno.burnedBy(manager, tokenId);
 
@@ -81,11 +93,11 @@ export async function scanVault() {
           token0,
           token1,
           pair,
-          project: "???", // placeholder until you implement project detection
+          project: "???", // placeholder for future project detection
           sender: sender.toLowerCase(),
         });
       } catch {
-        // skip failed lookups
+        // skip if any lookup fails
       }
     }
   }
