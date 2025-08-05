@@ -13,9 +13,10 @@ const MANAGER_NAMES: Record<string, string> = {
   "0x7C5f5A4bBd8fD63184577525326123B519429bDc": "V4",
 };
 
+// ✅ ABI with named return values — required for correct decoding
 const ERC721_ABI = [
   "function ownerOf(uint256 tokenId) view returns (address)",
-  "function positions(uint256 tokenId) view returns (uint96,address,address,address,address,uint24,int24,int24,uint128,uint256,uint256,uint128,uint128)"
+  "function positions(uint256 tokenId) view returns (uint96 nonce, address operator, address token0, address token1, uint24 fee, int24 tickLower, int24 tickUpper, uint128 liquidity, uint256 feeGrowthInside0LastX128, uint256 feeGrowthInside1LastX128, uint128 tokensOwed0, uint128 tokensOwed1)"
 ];
 
 async function getTokenSymbol(address: string): Promise<string> {
@@ -24,7 +25,7 @@ async function getTokenSymbol(address: string): Promise<string> {
     const token = new ethers.Contract(address, ERC20_ABI, provider);
     return await token.symbol();
   } catch {
-    return address.slice(0, 6); // fallback to shortened address
+    return address.slice(0, 6); // fallback to address prefix
   }
 }
 
@@ -44,7 +45,7 @@ export async function scanVault() {
   const results: any[] = [];
   const fromBlock = 14_200_000;
 
-  // V2
+  // V2 tokens
   const depositFilter = inferno.filters.ERC20Deposited();
   const depositLogs = await inferno.queryFilter(depositFilter, fromBlock, "latest");
 
@@ -63,9 +64,10 @@ export async function scanVault() {
     });
   }
 
-  // V3 & V4
+  // V3 & V4 NFTs
   for (const [manager, version] of Object.entries(MANAGER_NAMES)) {
     const pm = new ethers.Contract(manager, ERC721_ABI, provider);
+
     const logs = await provider.getLogs({
       address: manager,
       fromBlock,
@@ -81,8 +83,8 @@ export async function scanVault() {
         if (owner.toLowerCase() !== VAULT.toLowerCase()) continue;
 
         const pos = await pm.positions(tokenId);
-        const token0 = pos[2]; // corrected: token0 is at index 2
-        const token1 = pos[3]; // corrected: token1 is at index 3
+        const token0 = pos.token0;
+        const token1 = pos.token1;
         const pair = await resolvePairSymbol(token0, token1);
         const sender = await inferno.burnedBy(manager, tokenId);
 
@@ -93,11 +95,11 @@ export async function scanVault() {
           token0,
           token1,
           pair,
-          project: "???", // placeholder
+          project: "???", // placeholder for future logic
           sender: sender.toLowerCase(),
         });
-      } catch {
-        // skip failed lookups
+      } catch (err) {
+        console.warn(`Failed to process tokenId ${tokenId} on ${version}:`, err.message);
       }
     }
   }
