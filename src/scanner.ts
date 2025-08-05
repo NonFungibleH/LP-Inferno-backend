@@ -13,39 +13,42 @@ const MANAGER_NAMES: Record<string, string> = {
   "0x7C5f5A4bBd8fD63184577525326123B519429bDc": "V4",
 };
 
-// ✅ ABI with named return values — required for correct decoding
 const ERC721_ABI = [
   "function ownerOf(uint256 tokenId) view returns (address)",
-  "function positions(uint256 tokenId) view returns (uint96 nonce, address operator, address token0, address token1, uint24 fee, int24 tickLower, int24 tickUpper, uint128 liquidity, uint256 feeGrowthInside0LastX128, uint256 feeGrowthInside1LastX128, uint128 tokensOwed0, uint128 tokensOwed1)"
+  "function positions(uint256 tokenId) view returns (uint96,address,address,address,address,uint24,int24,int24,uint128,uint256,uint256,uint128,uint128)"
 ];
 
 async function getTokenSymbol(address: string): Promise<string> {
   const ERC20_ABI = ["function symbol() view returns (string)"];
   try {
+    if (!address || address === ethers.ZeroAddress) return "???";
     const token = new ethers.Contract(address, ERC20_ABI, provider);
-    return await token.symbol();
-  } catch {
-    return address.slice(0, 6); // fallback to address prefix
+    const symbol = await token.symbol();
+    return symbol;
+  } catch (err: any) {
+    console.warn(`⚠️ Symbol lookup failed for ${address}: ${err.message}`);
+    return address.slice(0, 6); // fallback to shortened address
   }
 }
 
 async function resolvePairSymbol(token0: string, token1: string): Promise<string> {
-  try {
-    const [sym0, sym1] = await Promise.all([
-      getTokenSymbol(token0),
-      getTokenSymbol(token1),
-    ]);
-    return `${sym0}/${sym1}`;
-  } catch {
-    return "???/???";
+  const [sym0, sym1] = await Promise.all([
+    getTokenSymbol(token0),
+    getTokenSymbol(token1),
+  ]);
+
+  if (sym0 === "???" || sym1 === "???") {
+    console.warn(`⚠️ Could not resolve pair symbols for ${token0} / ${token1}`);
   }
+
+  return `${sym0}/${sym1}`;
 }
 
 export async function scanVault() {
   const results: any[] = [];
   const fromBlock = 14_200_000;
 
-  // V2 tokens
+  // V2
   const depositFilter = inferno.filters.ERC20Deposited();
   const depositLogs = await inferno.queryFilter(depositFilter, fromBlock, "latest");
 
@@ -64,10 +67,9 @@ export async function scanVault() {
     });
   }
 
-  // V3 & V4 NFTs
+  // V3 & V4
   for (const [manager, version] of Object.entries(MANAGER_NAMES)) {
     const pm = new ethers.Contract(manager, ERC721_ABI, provider);
-
     const logs = await provider.getLogs({
       address: manager,
       fromBlock,
@@ -83,8 +85,11 @@ export async function scanVault() {
         if (owner.toLowerCase() !== VAULT.toLowerCase()) continue;
 
         const pos = await pm.positions(tokenId);
-        const token0 = pos.token0;
-        const token1 = pos.token1;
+        const token0 = pos[2]; // token0 position
+        const token1 = pos[3]; // token1 position
+
+        console.log(`🔍 ${version} Token #${tokenId}: token0=${token0}, token1=${token1}`);
+
         const pair = await resolvePairSymbol(token0, token1);
         const sender = await inferno.burnedBy(manager, tokenId);
 
@@ -95,15 +100,16 @@ export async function scanVault() {
           token0,
           token1,
           pair,
-          project: "???", // placeholder for future logic
+          project: "???", // placeholder
           sender: sender.toLowerCase(),
         });
-      } catch (err) {
-        console.warn(`Failed to process tokenId ${tokenId} on ${version}:`, err.message);
+      } catch (err: any) {
+        console.warn(`❌ Failed to resolve ${version} tokenId ${tokenId}: ${err.message}`);
+        // skip failed lookups
       }
     }
   }
 
   fs.writeFileSync("data/vault.json", JSON.stringify(results, null, 2));
-  console.log("Scan complete:", results.length, "records found.");
+  console.log("✅ Scan complete:", results.length, "records found.");
 }
