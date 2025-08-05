@@ -15,7 +15,7 @@ const MANAGER_NAMES: Record<string, string> = {
 
 const ERC721_ABI = [
   "function ownerOf(uint256 tokenId) view returns (address)",
-  "function positions(uint256 tokenId) view returns (uint96,address,address token0,address token1,uint24,int24,int24,uint128,uint256,uint256,uint128,uint128)"
+  "function positions(uint256 tokenId) view returns (uint96,address,address,address,address,uint24,int24,int24,uint128,uint256,uint256,uint128,uint128)"
 ];
 
 async function getTokenSymbol(address: string): Promise<string> {
@@ -24,7 +24,7 @@ async function getTokenSymbol(address: string): Promise<string> {
     const token = new ethers.Contract(address, ERC20_ABI, provider);
     return await token.symbol();
   } catch {
-    return address.slice(0, 6); // fallback: shorten address
+    return address.slice(0, 6); // fallback to shortened address
   }
 }
 
@@ -81,8 +81,8 @@ export async function scanVault() {
         if (owner.toLowerCase() !== VAULT.toLowerCase()) continue;
 
         const pos = await pm.positions(tokenId);
-        const token0 = pos.token0;
-        const token1 = pos.token1;
+        const token0 = pos[2]; // corrected: token0 is at index 2
+        const token1 = pos[3]; // corrected: token1 is at index 3
         const pair = await resolvePairSymbol(token0, token1);
         const sender = await inferno.burnedBy(manager, tokenId);
 
@@ -93,11 +93,11 @@ export async function scanVault() {
           token0,
           token1,
           pair,
-          project: "???", // placeholder for future project detection
+          project: "???", // placeholder
           sender: sender.toLowerCase(),
         });
       } catch {
-        // skip if any lookup fails
+        // skip failed lookups
       }
     }
   }
