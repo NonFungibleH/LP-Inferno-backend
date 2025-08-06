@@ -10,7 +10,7 @@ const V3_MANAGER    = "0xC36442b4a4522E871399CD717aBDD847Ab11FE88";
 const V4_MANAGER    = "0x7C5f5A4bBd8fD63184577525326123B519429bDc";
 
 // ← update this to your new vault’s deployment block
-const START_BLOCK   = 33201218;
+const START_BLOCK   = 37245032;
 
 const CHAINS = [
   {
