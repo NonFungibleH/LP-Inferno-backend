@@ -21,9 +21,9 @@ const V4_MANAGER = (process.env.V4_MANAGER ?? "0x7C5f5A4bBd8fD63184577525326123B
 // Start from your deployment block
 const START_BLOCK = Number(process.env.START_BLOCK ?? 33201418);
 
-// Chunk sizes (tune if your RPC still complains)
-const CHUNK_ERC721 = 5_000;
-const CHUNK_ERC20  = 5_000;
+// Chunk sizes (more conservative to avoid RPC limits)
+const CHUNK_ERC721 = 2_000;
+const CHUNK_ERC20  = 2_000;
 
 const provider = new ethers.JsonRpcProvider(BASE_RPC);
 
@@ -51,7 +51,7 @@ type VaultRow = {
   token0: string;
   token1: string;
   pair: string;
-  project?: string; // optional label if you want to set it
+  project?: string;
   sender: string;
   txHash: string;
   timestamp: number;
@@ -101,8 +101,8 @@ async function chunkedGetLogs(params: {
         topics,
       });
       logs.push(...part);
-    } catch (e) {
-      console.warn(`⚠️ getLogs failed for ${start}-${end}:`, (e as any)?.message ?? e);
+    } catch (e: any) {
+      console.warn(`⚠️ getLogs failed for ${start}-${end}:`, e?.message ?? e);
     }
   }
   return logs;
@@ -213,7 +213,13 @@ async function scanVault() {
       const blockNumber = log.blockNumber;
       const timestamp = await getBlockTimestamp(blockNumber);
 
-      if (hasRow(existing, r => r.type === "v3" && r.tokenId === tokenId)) continue;
+      if (
+        hasRow(existing, r =>
+          r.type === "v3" &&
+          r.tokenId === tokenId &&
+          r.manager?.toLowerCase() === V3_MANAGER
+        )
+      ) continue;
 
       newV3.push({
         type: "v3",
@@ -241,7 +247,13 @@ async function scanVault() {
       const blockNumber = log.blockNumber;
       const timestamp = await getBlockTimestamp(blockNumber);
 
-      if (hasRow(existing, r => r.type === "v4" && r.tokenId === tokenId)) continue;
+      if (
+        hasRow(existing, r =>
+          r.type === "v4" &&
+          r.tokenId === tokenId &&
+          r.manager?.toLowerCase() === V4_MANAGER
+        )
+      ) continue;
 
       newV4.push({
         type: "v4",
@@ -287,9 +299,13 @@ async function scanVault() {
       const from = ethers.getAddress("0x" + fromPadded.slice(26));
 
       // dedupe by (pairAddress, txHash)
-      if (hasRow(existing, r => r.type === "v2" && r.pairAddress?.toLowerCase() === tokenAddr && r.txHash === log.transactionHash)) {
-        continue;
-      }
+      if (
+        hasRow(existing, r =>
+          r.type === "v2" &&
+          r.pairAddress?.toLowerCase() === tokenAddr &&
+          r.txHash === log.transactionHash
+        )
+      ) continue;
 
       newV2.push({
         type: "v2",
@@ -312,11 +328,13 @@ async function scanVault() {
   await enrichV3orV4(merged, V3_MANAGER, "v3");
   await enrichV3orV4(merged, V4_MANAGER, "v4");
 
-  // Persist
+  // Persist (only after successful enrichment)
   saveJSON(vaultPath, merged);
   saveJSON(metaPath, { lastSeenBlock: toBlock });
 
-  console.log(`✅ Added V2=${newV2.length}, V3=${newV3.length}, V4=${newV4.length}. Total rows: ${merged.length}`);
+  console.log(
+    `✅ Added V2=${newV2.length}, V3=${newV3.length}, V4=${newV4.length}. Total rows: ${merged.length}`
+  );
 }
 
 scanVault().catch((err) => {
