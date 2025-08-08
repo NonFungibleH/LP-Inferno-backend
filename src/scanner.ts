@@ -7,8 +7,8 @@ const RPC_URL = process.env.RPC_URL!;
 const provider = new ethers.JsonRpcProvider(RPC_URL);
 
 const VAULT = "0x9be6e6Ea828d5BE4aD1AD4b46d9f704B75052929";
-const START_BLOCK = 33201418; // vault deploy block
-const CHUNK_SIZE = 500; // safe for Ankr
+const START_BLOCK = 33201418; // Vault deploy block
+const CHUNK_SIZE = 2000; // Small block chunks to avoid RPC limit
 const CHAIN = "base";
 
 const infernoAbi = JSON.parse(
@@ -45,11 +45,10 @@ async function scanVault() {
   const results: any[] = [];
   const latestBlock = await provider.getBlockNumber();
 
-  console.log(`🔍 Scanning base from ${START_BLOCK} to ${latestBlock}`);
+  console.log(`🔍 Scanning ${CHAIN} from ${START_BLOCK} to ${latestBlock} in chunks of ${CHUNK_SIZE} blocks`);
 
   // ---- Scan V2 Deposits ----
   const depositFilter = inferno.filters.ERC20Deposited();
-
   for (let from = START_BLOCK; from <= latestBlock; from += CHUNK_SIZE) {
     const to = Math.min(from + CHUNK_SIZE - 1, latestBlock);
     const depositLogs = await inferno.queryFilter(depositFilter, from, to);
@@ -114,7 +113,7 @@ async function scanVault() {
             chain: CHAIN,
           });
         } catch {
-          // skip invalid tokenIds
+          // skip errors for invalid tokenIds
         }
       }
     }
