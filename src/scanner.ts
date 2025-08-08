@@ -1,33 +1,32 @@
-// src/index.ts
 import { ethers } from "ethers";
 import fs from "fs";
-import path from "path";
 
+// --- CONFIG ---
+const VAULT = "0x9be6e6Ea828d5BE4aD1AD4b46d9f704B75052929";
 const RPC_URL = process.env.RPC_URL!;
+const CHAIN = "base";
+const START_BLOCK = 33200000; // adjust as needed
+const CHUNK_SIZE = 2000; // keeps RPC happy
+
 const provider = new ethers.JsonRpcProvider(RPC_URL);
 
-const VAULT = "0x9be6e6Ea828d5BE4aD1AD4b46d9f704B75052929";
-const START_BLOCK = 33201418; // Vault deploy block
-const CHUNK_SIZE = 2000; // Keeps block ranges small to avoid RPC errors
-const CHAIN = "base";
-
-const infernoAbi = JSON.parse(
-  fs.readFileSync("./abis/LpInfernoABI.json", "utf8")
-);
+// --- ABIs ---
+const infernoAbi = JSON.parse(fs.readFileSync("./abis/LpInfernoABI.json", "utf8"));
 const inferno = new ethers.Contract(VAULT, infernoAbi, provider);
 
 const MANAGER_NAMES: Record<string, string> = {
-  "0xC36442b4a4522E871399CD717aBDD847Ab11FE88": "v3",
-  "0x7C5f5A4bBd8fD63184577525326123B519429bDc": "v4",
-  "0x03a520b32C04BF3bEEf7bEb72e919cF822Ed34f1": "v3",
+  "0xC36442b4a4522E871399CD717aBDD847Ab11FE88": "V3",
+  "0x7C5f5A4bBd8fD63184577525326123B519429bDc": "V4",
 };
 
 const ERC721_ABI = [
   "function ownerOf(uint256 tokenId) view returns (address)",
-  "function positions(uint256 tokenId) view returns (uint96,address,address token0,address token1,uint24,int24,int24,uint128,uint256,uint256,uint128,uint128)"
+  "function positions(uint256 tokenId) view returns (uint96 nonce, address operator, address token0, address token1, uint24 fee, int24 tickLower, int24 tickUpper, uint128 liquidity, uint256 feeGrowthInside0LastX128, uint256 feeGrowthInside1LastX128, uint128 tokensOwed0, uint128 tokensOwed1)",
 ];
+
 const ERC20_ABI = ["function symbol() view returns (string)"];
 
+// --- Helpers ---
 async function resolvePairSymbol(token0: string, token1: string): Promise<string> {
   try {
     const [c0, c1] = [
@@ -41,12 +40,15 @@ async function resolvePairSymbol(token0: string, token1: string): Promise<string
   }
 }
 
-async function scanVault() {
+// --- Scanner ---
+export async function scanVault() {
   const results: any[] = [];
-
-  // ---- Scan V2 Deposits ----
-  const depositFilter = inferno.filters.ERC20Deposited();
   const latestBlock = await provider.getBlockNumber();
+
+  console.log(`🔍 Scanning ${CHAIN} from ${START_BLOCK} to ${latestBlock}`);
+
+  // --- V2 Deposits ---
+  const depositFilter = inferno.filters.ERC20Deposited();
 
   for (let from = START_BLOCK; from <= latestBlock; from += CHUNK_SIZE) {
     const to = Math.min(from + CHUNK_SIZE - 1, latestBlock);
@@ -59,7 +61,7 @@ async function scanVault() {
         tokenId: null,
         manager: null,
         token0: token.toLowerCase(),
-        token1: "0x4200000000000000000000000000000000000006", // assume WETH
+        token1: "0x4200000000000000000000000000000000000006", // WETH
         pair: await resolvePairSymbol(token, "0x4200000000000000000000000000000000000006"),
         project: "???",
         sender: user.toLowerCase(),
@@ -70,7 +72,7 @@ async function scanVault() {
     }
   }
 
-  // ---- Scan V3 / V4 Burns ----
+  // --- V3 & V4 NFT Burns ---
   const TRANSFER_TOPIC = ethers.id("Transfer(address,address,uint256)");
 
   for (const [manager, version] of Object.entries(MANAGER_NAMES)) {
@@ -86,7 +88,7 @@ async function scanVault() {
         topics: [TRANSFER_TOPIC, null, ethers.zeroPadValue(VAULT, 32)],
       });
 
-      const tokenIds = [...new Set(logs.map(log => BigInt(log.topics[3]).toString()))];
+      const tokenIds = [...new Set(logs.map((log) => BigInt(log.topics[3]).toString()))];
 
       for (const tokenId of tokenIds) {
         try {
@@ -107,21 +109,21 @@ async function scanVault() {
             pair,
             project: "???",
             sender: sender.toLowerCase(),
-            txHash: logs.find(l => BigInt(l.topics[3]).toString() === tokenId)?.transactionHash || "",
-            timestamp: (await provider.getBlock(logs[0].blockNumber)).timestamp,
+            txHash: null,
+            timestamp: null,
             chain: CHAIN,
           });
         } catch {
-          // skip errors for invalid tokenIds
+          // skip
         }
       }
     }
   }
 
-  // ---- Save to vault.json ----
-  const filePath = path.join("data", "vault.json");
-  fs.writeFileSync(filePath, JSON.stringify(results, null, 2));
-  console.log(`✅ Saved ${results.length} records to ${filePath}`);
+  // --- Save to file ---
+  fs.writeFileSync("./data/vault.json", JSON.stringify(results, null, 2));
+  console.log(`✅ Saved ${results.length} entries to data/vault.json`);
 }
 
+// --- Run ---
 scanVault().catch(console.error);
