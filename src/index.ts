@@ -87,7 +87,7 @@ async function fetchPositionTokens(
 async function scanChain(chainName: string, rpcUrl: string) {
   const provider = new ethers.JsonRpcProvider(rpcUrl);
   const endBlock = await provider.getBlockNumber();
-  const chunkSize = 50_000;
+  const chunkSize = 2_000;
   const vaultEntries: any[] = [];
 
   // ← use the new event name
