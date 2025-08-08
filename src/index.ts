@@ -12,6 +12,9 @@ const V4_MANAGER    = "0x7C5f5A4bBd8fD63184577525326123B519429bDc";
 // ← update this to your new vault’s deployment block
 const START_BLOCK   = 33201218;
 
+// default chunk size
+const INITIAL_CHUNK = 2000;
+
 const CHAINS = [
   {
     name: "base",
@@ -43,9 +46,8 @@ async function fetchPositionTokens(
       const endBlock = await provider.getBlockNumber();
       const logs = await provider.getLogs({
         address: VAULT_ADDRESS,
-        fromBlock: endBlock - 5000,
+        fromBlock: Math.max(endBlock - 5000, START_BLOCK),
         toBlock: endBlock,
-        // match your FeesClaimed event in the contract
         topics: [
           ethers.id(
             "FeesClaimed(address,address,uint256,address,address,uint256,uint256)"
@@ -53,7 +55,6 @@ async function fetchPositionTokens(
         ]
       });
       for (const log of logs) {
-        // decode [user,nft,tokenId,token0,token1,amount0,amount1]
         const [ , nftAddr, tid, token0, token1 ] =
           ethers.AbiCoder.defaultAbiCoder().decode(
             ["address","address","uint256","address","address","uint256","uint256"],
@@ -72,7 +73,7 @@ async function fetchPositionTokens(
     return { token0: ethers.ZeroAddress, token1: ethers.ZeroAddress };
   }
 
-  // V3: read positions()
+  // V3
   try {
     const abi = [
       "function positions(uint256) view returns (uint96,address,address,address,uint24,int24,int24,uint128,uint256,uint256,uint128,uint128)"
@@ -84,37 +85,66 @@ async function fetchPositionTokens(
   }
 }
 
+async function safeGetLogs(
+  provider: ethers.JsonRpcProvider,
+  params: ethers.Filter,
+  fromBlock: number,
+  toBlock: number
+) {
+  let chunkSize = toBlock - fromBlock;
+  while (chunkSize > 0) {
+    try {
+      return await provider.getLogs({
+        ...params,
+        fromBlock,
+        toBlock
+      });
+    } catch (err: any) {
+      if (
+        err.message &&
+        err.message.toLowerCase().includes("block range") &&
+        chunkSize > 1
+      ) {
+        chunkSize = Math.floor(chunkSize / 2);
+        toBlock = fromBlock + chunkSize;
+        console.warn(`⚠️ Range too big, retrying with ${chunkSize} blocks...`);
+        continue;
+      }
+      throw err;
+    }
+  }
+  return [];
+}
+
 async function scanChain(chainName: string, rpcUrl: string) {
   const provider = new ethers.JsonRpcProvider(rpcUrl);
   const endBlock = await provider.getBlockNumber();
-  const chunkSize = 2_000;
   const vaultEntries: any[] = [];
 
-  // ← use the new event name
   const ERC20DepositedTopic = ethers.id("ERC20Deposited(address,address,uint256)");
   const NFTBurnedTopic      = ethers.id("NFTBurned(address,address,uint256)");
 
-  for (let fromBlock = START_BLOCK; fromBlock <= endBlock; fromBlock += chunkSize) {
-    const toBlock = Math.min(endBlock, fromBlock + chunkSize);
+  for (let fromBlock = START_BLOCK; fromBlock <= endBlock; fromBlock += INITIAL_CHUNK) {
+    let toBlock = Math.min(endBlock, fromBlock + INITIAL_CHUNK);
+
     console.log(`🔍 Scanning ${chainName} from ${fromBlock} to ${toBlock}`);
 
-    const logs = await provider.getLogs({
-      address: VAULT_ADDRESS,
+    const logs = await safeGetLogs(
+      provider,
+      { address: VAULT_ADDRESS },
       fromBlock,
       toBlock
-    });
+    );
 
     for (const log of logs) {
       const block     = await provider.getBlock(log.blockNumber);
       const timestamp = Number(block.timestamp);
       const txHash    = log.transactionHash;
 
-      // — V2: ERC20Deposited ——
       if (log.topics[0] === ERC20DepositedTopic) {
         const sender = "0x" + log.topics[1].slice(26);
         const token  = "0x" + log.topics[2].slice(26);
 
-        // fetch LP pair tokens
         const pairABI = [
           "function token0() view returns (address)",
           "function token1() view returns (address)"
@@ -129,7 +159,7 @@ async function scanChain(chainName: string, rpcUrl: string) {
         const project = ignoreSymbols.includes(sym0) ? sym1 : sym0;
 
         vaultEntries.push({
-          type:      "v2",
+          type: "v2",
           token,
           token0,
           token1,
@@ -138,10 +168,9 @@ async function scanChain(chainName: string, rpcUrl: string) {
           sender,
           txHash,
           timestamp,
-          chain:     chainName
+          chain: chainName
         });
 
-      // — V3/V4: NFTBurned ——
       } else if (log.topics[0] === NFTBurnedTopic) {
         const sender  = "0x" + log.topics[1].slice(26);
         const manager = "0x" + log.topics[2].slice(26);
@@ -165,7 +194,7 @@ async function scanChain(chainName: string, rpcUrl: string) {
           sender,
           txHash,
           timestamp,
-          chain:  chainName
+          chain: chainName
         });
       }
     }
