@@ -12,7 +12,7 @@ const V4_MANAGER    = "0x7C5f5A4bBd8fD63184577525326123B519429bDc";
 const START_BLOCK   = 33201394;
 
 // default chunk size for event scanning
-const INITIAL_CHUNK = 2000; // Reduced to avoid "Block range is too large"
+const INITIAL_CHUNK = 2000;
 const MAX_RETRIES = 3;
 const RETRY_DELAY = 1000;
 
@@ -39,20 +39,88 @@ async function fetchTokenSymbol(address: string, provider: ethers.JsonRpcProvide
 async function fetchPositionTokens(
   manager: string,
   tokenId: string,
-  provider: ethers.JsonRpcProvider
+  provider: ethers.JsonRpcProvider,
+  burnBlock: number
 ) {
   const isV4 = manager.toLowerCase() === V4_MANAGER.toLowerCase();
-  const abi = [
-    "function positions(uint256) view returns (uint96,address,address,address,uint24,int24,int24,uint128,uint256,uint256,uint128,uint128)"
-  ];
 
+  // Validate tokenId ownership
   try {
+    const erc721Abi = ["function ownerOf(uint256) view returns (address)"];
+    const contract = new ethers.Contract(manager, erc721Abi, provider);
+    const owner = await contract.ownerOf(tokenId);
+    if (owner.toLowerCase() !== VAULT_ADDRESS.toLowerCase()) {
+      console.warn(`⚠️ tokenId ${tokenId} not owned by vault ${VAULT_ADDRESS} on manager ${manager}, owner: ${owner}`);
+      return { token0: ethers.ZeroAddress, token1: ethers.ZeroAddress };
+    }
+  } catch (e) {
+    console.warn(`⚠️ ownerOf check failed for tokenId ${tokenId} on manager ${manager}:`, e);
+    return { token0: ethers.ZeroAddress, token1: ethers.ZeroAddress };
+  }
+
+  if (isV4) {
+    // Try positions function
+    try {
+      const abi = [
+        "function positions(uint256) view returns (uint96,address,address,address,uint24,int24,int24,uint128,uint256,uint256,uint128,uint128)"
+      ];
+      const contract = new ethers.Contract(manager, abi, provider);
+      const pos = await contract.positions(tokenId);
+      console.log(`✅ Fetched position data for tokenId ${tokenId} on manager ${manager}`);
+      return { token0: pos[2], token1: pos[3] };
+    } catch (e) {
+      console.warn(`⚠️ positions call failed for tokenId ${tokenId} on manager ${manager}:`, e);
+    }
+
+    // Fallback to FeesClaimed event
+    try {
+      const searchStartBlock = Math.max(START_BLOCK, burnBlock - INITIAL_CHUNK);
+      const searchEndBlock = burnBlock + INITIAL_CHUNK;
+      console.log(`🔍 Fallback: Searching FeesClaimed events for tokenId ${tokenId} from block ${searchStartBlock} to ${searchEndBlock}`);
+      const logs = await safeGetLogs(
+        provider,
+        {
+          address: VAULT_ADDRESS,
+          fromBlock: searchStartBlock,
+          toBlock: searchEndBlock,
+          topics: [
+            ethers.id("FeesClaimed(address,address,uint256,address,address,uint256,uint256)"),
+            null, // user
+            ethers.zeroPadValue(manager.toLowerCase(), 32), // nft
+            ethers.zeroPadValue(ethers.toBeHex(BigInt(tokenId)), 32) // tokenId
+          ]
+        },
+        searchStartBlock,
+        searchEndBlock
+      );
+      if (logs.length > 0) {
+        for (const log of logs) {
+          const [, , , token0, token1] = ethers.AbiCoder.defaultAbiCoder().decode(
+            ["address", "address", "uint256", "address", "address", "uint256", "uint256"],
+            log.data
+          );
+          console.log(`✅ Found FeesClaimed event for tokenId ${tokenId} at block ${log.blockNumber}, tx: ${log.transactionHash}`);
+          return { token0, token1 };
+        }
+      }
+      console.warn(`⚠️ No FeesClaimed event found for tokenId ${tokenId} on manager ${manager} from block ${searchStartBlock} to ${searchEndBlock}`);
+    } catch (e) {
+      console.warn(`⚠️ FeesClaimed fetch error for tokenId ${tokenId} on manager ${manager}:`, e);
+    }
+    return { token0: ethers.ZeroAddress, token1: ethers.ZeroAddress };
+  }
+
+  // V3
+  try {
+    const abi = [
+      "function positions(uint256) view returns (uint96,address,address,address,uint24,int24,int24,uint128,uint256,uint256,uint128,uint128)"
+    ];
     const contract = new ethers.Contract(manager, abi, provider);
     const pos = await contract.positions(tokenId);
     console.log(`✅ Fetched position data for tokenId ${tokenId} on manager ${manager}`);
     return { token0: pos[2], token1: pos[3] };
   } catch (e) {
-    console.warn(`⚠️ Token fetch error for tokenId ${tokenId} on manager ${manager}:`, e);
+    console.warn(`⚠️ V3 token fetch error for tokenId ${tokenId} on manager ${manager}:`, e);
     return { token0: ethers.ZeroAddress, token1: ethers.ZeroAddress };
   }
 }
@@ -154,7 +222,7 @@ async function scanChain(chainName: string, rpcUrl: string) {
         const manager = "0x" + log.topics[2].slice(26);
         const tokenId = ethers.toBigInt(log.data).toString();
 
-        const { token0, token1 } = await fetchPositionTokens(manager, tokenId, provider);
+        const { token0, token1 } = await fetchPositionTokens(manager, tokenId, provider, log.blockNumber);
         const sym0    = await fetchTokenSymbol(token0, provider);
         const sym1    = await fetchTokenSymbol(token1, provider);
         const pair    = `${sym0}/${sym1}`;
