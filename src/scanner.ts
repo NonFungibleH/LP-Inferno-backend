@@ -8,7 +8,7 @@ const provider = new ethers.JsonRpcProvider(RPC_URL);
 
 const VAULT = process.env.VAULT_ADDRESS?.toLowerCase() || "0x9be6e6ea828d5be4ad1ad4b46d9f704b75052929";
 const START_BLOCK = 33201418;
-const CHUNK_SIZE = 2000;
+const CHUNK_SIZE = 1000;
 const CHAIN = "base";
 
 const infernoAbi = JSON.parse(fs.readFileSync("./abis/LpInfernoABI.json", "utf8"));
