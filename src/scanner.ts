@@ -1,19 +1,18 @@
+// src/index.ts
+import { ethers } from "ethers";
 import fs from "fs";
 import path from "path";
-import { ethers } from "ethers";
 
 const RPC_URL = process.env.RPC_URL!;
 const provider = new ethers.JsonRpcProvider(RPC_URL);
 
-const VAULT_ADDRESS = "0x9be6e6Ea828d5BE4aD1AD4b46d9f704B75052929";
+const VAULT = process.env.VAULT_ADDRESS?.toLowerCase() || "0x9be6e6ea828d5be4ad1ad4b46d9f704b75052929";
 const START_BLOCK = 33201418;
 const CHUNK_SIZE = 2000;
 const CHAIN = "base";
 
-const LpInfernoABI = JSON.parse(
-  fs.readFileSync("./abis/LpInfernoABI.json", "utf8")
-);
-const vault = new ethers.Contract(VAULT_ADDRESS, LpInfernoABI, provider);
+const infernoAbi = JSON.parse(fs.readFileSync("./abis/LpInfernoABI.json", "utf8"));
+const inferno = new ethers.Contract(VAULT, infernoAbi, provider);
 
 const MANAGER_NAMES: Record<string, string> = {
   "0xC36442b4a4522E871399CD717aBDD847Ab11FE88": "v3",
@@ -27,49 +26,62 @@ const ERC721_ABI = [
 ];
 const ERC20_ABI = ["function symbol() view returns (string)"];
 
-async function getSymbol(tokenAddress: string) {
+async function resolvePairSymbol(token0: string, token1: string): Promise<string> {
   try {
-    const tokenContract = new ethers.Contract(tokenAddress, ERC20_ABI, provider);
-    return await tokenContract.symbol();
+    const [c0, c1] = [
+      new ethers.Contract(token0, ERC20_ABI, provider),
+      new ethers.Contract(token1, ERC20_ABI, provider),
+    ];
+    const [sym0, sym1] = await Promise.all([c0.symbol(), c1.symbol()]);
+    return `${sym0}/${sym1}`;
   } catch {
-    return "???";
+    return "???/???";
   }
 }
 
-async function getPair(token0: string, token1: string) {
-  const [sym0, sym1] = await Promise.all([
-    getSymbol(token0),
-    getSymbol(token1)
-  ]);
-  return `${sym0}/${sym1}`;
+function loadExistingData(): any[] {
+  const filePath = path.join("data", "vault.json");
+  if (!fs.existsSync(filePath)) return [];
+  try {
+    return JSON.parse(fs.readFileSync(filePath, "utf8"));
+  } catch {
+    return [];
+  }
 }
 
-async function scan() {
-  const results: any[] = [];
+async function scanVault() {
+  let results = loadExistingData().filter(r => r.sender && r.sender.length === 42); // sanity check
+  const existingKeys = new Set(results.map(r => `${r.manager}-${r.tokenId}`));
+
   const latestBlock = await provider.getBlockNumber();
+  console.log(`🔍 Scanning ${CHAIN} from ${START_BLOCK} to ${latestBlock} for vault ${VAULT}`);
 
-  console.log(`Scanning ${CHAIN} from ${START_BLOCK} to ${latestBlock} in chunks of ${CHUNK_SIZE}`);
-
-  // ERC20 Deposits
-  const depositFilter = vault.filters.ERC20Deposited();
+  const depositFilter = inferno.filters.ERC20Deposited();
   for (let from = START_BLOCK; from <= latestBlock; from += CHUNK_SIZE) {
     const to = Math.min(from + CHUNK_SIZE - 1, latestBlock);
-    const logs = await vault.queryFilter(depositFilter, from, to);
-    for (const log of logs) {
+    const depositLogs = await inferno.queryFilter(depositFilter, from, to);
+    for (const log of depositLogs) {
       const { user, token } = log.args as any;
-      results.push({
-        type: "v2",
-        tokenId: null,
-        token0: token,
-        token1: "0x4200000000000000000000000000000000000006",
-        pair: await getPair(token, "0x4200000000000000000000000000000000000006"),
-        sender: user,
-        chain: CHAIN
-      });
+      const key = `v2-${token}`;
+      if (!existingKeys.has(key)) {
+        results.push({
+          type: "v2",
+          tokenId: null,
+          manager: null,
+          token0: token.toLowerCase(),
+          token1: "0x4200000000000000000000000000000000000006",
+          pair: await resolvePairSymbol(token, "0x4200000000000000000000000000000000000006"),
+          project: "???",
+          sender: user.toLowerCase(),
+          txHash: log.transactionHash,
+          timestamp: (await provider.getBlock(log.blockNumber)).timestamp,
+          chain: CHAIN,
+        });
+        existingKeys.add(key);
+      }
     }
   }
 
-  // NFT Burns
   const TRANSFER_TOPIC = ethers.id("Transfer(address,address,uint256)");
 
   for (const [manager, version] of Object.entries(MANAGER_NAMES)) {
@@ -77,36 +89,53 @@ async function scan() {
 
     for (let from = START_BLOCK; from <= latestBlock; from += CHUNK_SIZE) {
       const to = Math.min(from + CHUNK_SIZE - 1, latestBlock);
+
       const logs = await provider.getLogs({
         address: manager,
         fromBlock: from,
         toBlock: to,
-        topics: [TRANSFER_TOPIC, null, ethers.zeroPadValue(VAULT_ADDRESS, 32)],
+        topics: [TRANSFER_TOPIC, null, ethers.zeroPadValue(VAULT, 32)],
       });
 
-      const tokenIds = [...new Set(logs.map(l => BigInt(l.topics[3]).toString()))];
+      const tokenIds = [...new Set(logs.map(log => BigInt(log.topics[3]).toString()))];
+
       for (const tokenId of tokenIds) {
+        const key = `${manager}-${tokenId}`;
+        if (existingKeys.has(key)) continue;
+
         try {
           const owner = await pm.ownerOf(tokenId);
-          if (owner.toLowerCase() !== VAULT_ADDRESS.toLowerCase()) continue;
+          if (owner.toLowerCase() !== VAULT) continue;
+
           const pos = await pm.positions(tokenId);
+          const [token0, token1] = [pos.token0, pos.token1];
+          const pair = await resolvePairSymbol(token0, token1);
+          const sender = await inferno.burnedBy(manager, tokenId);
+
           results.push({
             type: version,
             tokenId,
-            token0: pos.token0,
-            token1: pos.token1,
-            pair: await getPair(pos.token0, pos.token1),
-            sender: await vault.burnedBy(manager, tokenId),
-            chain: CHAIN
+            manager: manager.toLowerCase(),
+            token0,
+            token1,
+            pair,
+            project: "???",
+            sender: sender.toLowerCase(),
+            txHash: logs.find(l => BigInt(l.topics[3]).toString() === tokenId)?.transactionHash || "",
+            timestamp: (await provider.getBlock(logs[0].blockNumber)).timestamp,
+            chain: CHAIN,
           });
-        } catch {}
+          existingKeys.add(key);
+        } catch {
+          // skip
+        }
       }
     }
   }
 
   const filePath = path.join("data", "vault.json");
   fs.writeFileSync(filePath, JSON.stringify(results, null, 2));
-  console.log(`Saved ${results.length} records`);
+  console.log(`✅ Updated ${filePath} — total ${results.length} records`);
 }
 
-scan().catch(console.error);
+scanVault().catch(console.error);
