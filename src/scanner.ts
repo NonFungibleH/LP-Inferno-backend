@@ -34,7 +34,8 @@ async function resolvePairSymbol(token0: string, token1: string): Promise<string
     ];
     const [sym0, sym1] = await Promise.all([c0.symbol(), c1.symbol()]);
     return `${sym0}/${sym1}`;
-  } catch {
+  } catch (error) {
+    console.error(`Failed to resolve pair for ${token0} and ${token1}:`, error);
     return "???/???";
   }
 }
