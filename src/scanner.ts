@@ -7,8 +7,8 @@ const RPC_URL = process.env.RPC_URL!;
 const provider = new ethers.JsonRpcProvider(RPC_URL);
 
 const VAULT = "0x9be6e6Ea828d5BE4aD1AD4b46d9f704B75052929";
-const START_BLOCK = 33201418; // Vault deploy block
-const CHUNK_SIZE = 2000; // Smaller chunks avoid RPC limit errors
+const START_BLOCK = 33201418; // vault deploy block
+const CHUNK_SIZE = 500; // safe for Ankr
 const CHAIN = "base";
 
 const infernoAbi = JSON.parse(
@@ -42,28 +42,15 @@ async function resolvePairSymbol(token0: string, token1: string): Promise<string
 }
 
 async function scanVault() {
-  const filePath = path.join("data", "vault.json");
-
-  // Load existing data
-  let existing: any[] = [];
-  let lastBlockScanned = START_BLOCK;
-  if (fs.existsSync(filePath)) {
-    const existingData = JSON.parse(fs.readFileSync(filePath, "utf8"));
-    existing = Array.isArray(existingData.records) ? existingData.records : existingData;
-    if (existingData.lastBlockScanned) {
-      lastBlockScanned = existingData.lastBlockScanned;
-    }
-  }
-
   const results: any[] = [];
   const latestBlock = await provider.getBlockNumber();
 
-  console.log(`🔍 Scanning from ${lastBlockScanned} to ${latestBlock} in chunks of ${CHUNK_SIZE} blocks...`);
+  console.log(`🔍 Scanning base from ${START_BLOCK} to ${latestBlock}`);
 
   // ---- Scan V2 Deposits ----
   const depositFilter = inferno.filters.ERC20Deposited();
 
-  for (let from = lastBlockScanned; from <= latestBlock; from += CHUNK_SIZE) {
+  for (let from = START_BLOCK; from <= latestBlock; from += CHUNK_SIZE) {
     const to = Math.min(from + CHUNK_SIZE - 1, latestBlock);
     const depositLogs = await inferno.queryFilter(depositFilter, from, to);
 
@@ -91,7 +78,7 @@ async function scanVault() {
   for (const [manager, version] of Object.entries(MANAGER_NAMES)) {
     const pm = new ethers.Contract(manager, ERC721_ABI, provider);
 
-    for (let from = lastBlockScanned; from <= latestBlock; from += CHUNK_SIZE) {
+    for (let from = START_BLOCK; from <= latestBlock; from += CHUNK_SIZE) {
       const to = Math.min(from + CHUNK_SIZE - 1, latestBlock);
 
       const logs = await provider.getLogs({
@@ -127,20 +114,16 @@ async function scanVault() {
             chain: CHAIN,
           });
         } catch {
-          // skip errors for invalid tokenIds
+          // skip invalid tokenIds
         }
       }
     }
   }
 
-  // ---- Merge & Save ----
-  const merged = [...existing, ...results];
-  fs.writeFileSync(filePath, JSON.stringify({
-    lastBlockScanned: latestBlock,
-    records: merged
-  }, null, 2));
-
-  console.log(`✅ Added ${results.length} new records. Total now: ${merged.length}`);
+  // ---- Save to vault.json ----
+  const filePath = path.join("data", "vault.json");
+  fs.writeFileSync(filePath, JSON.stringify(results, null, 2));
+  console.log(`✅ Saved ${results.length} records to ${filePath}`);
 }
 
 scanVault().catch(console.error);
