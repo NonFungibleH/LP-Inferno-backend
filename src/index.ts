@@ -13,7 +13,7 @@ const V4_MANAGER    = "0x7C5f5A4bBd8fD63184577525326123B519429bDc";
 const START_BLOCK   = 33201218;
 
 // default chunk size
-const INITIAL_CHUNK = 1000;
+const INITIAL_CHUNK = 500;
 
 const CHAINS = [
   {
