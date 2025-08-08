@@ -8,14 +8,13 @@ const VAULT_ADDRESS = "0x9be6e6Ea828d5BE4aD1AD4b46d9f704B75052929";
 const V3_MANAGER    = "0xC36442b4a4522E871399CD717aBDD847Ab11FE88";
 const V4_MANAGER    = "0x7C5f5A4bBd8fD63184577525326123B519429bDc";
 
-// ← update this to your new vault’s deployment block
-const START_BLOCK   = 33201218;
+// ← vault deployment block
+const START_BLOCK   = 33201394;
 
-// default chunk size and max range
-const INITIAL_CHUNK = 20000; // Increased for fewer RPC calls
-const MAX_BLOCK_RANGE = 50000; // Limit search to last 50,000 blocks for V4 Mint events
-const MAX_RETRIES = 3; // Retry attempts for timeout errors
-const RETRY_DELAY = 1000; // Delay between retries (ms)
+// default chunk size for event scanning
+const INITIAL_CHUNK = 2000; // Reduced to avoid "Block range is too large"
+const MAX_RETRIES = 3;
+const RETRY_DELAY = 1000;
 
 const CHAINS = [
   {
@@ -40,62 +39,20 @@ async function fetchTokenSymbol(address: string, provider: ethers.JsonRpcProvide
 async function fetchPositionTokens(
   manager: string,
   tokenId: string,
-  provider: ethers.JsonRpcProvider,
-  burnBlock: number
+  provider: ethers.JsonRpcProvider
 ) {
   const isV4 = manager.toLowerCase() === V4_MANAGER.toLowerCase();
+  const abi = [
+    "function positions(uint256) view returns (uint96,address,address,address,uint24,int24,int24,uint128,uint256,uint256,uint128,uint128)"
+  ];
 
-  if (isV4) {
-    // Try fetching token0 and token1 from Mint events
-    try {
-      const endBlock = await provider.getBlockNumber();
-      const searchStartBlock = Math.max(START_BLOCK, endBlock - MAX_BLOCK_RANGE);
-      console.log(`🔍 Searching Mint events for tokenId ${tokenId} from block ${searchStartBlock} to ${endBlock}`);
-      for (let fromBlock = searchStartBlock; fromBlock <= endBlock; fromBlock += INITIAL_CHUNK) {
-        const toBlock = Math.min(fromBlock + INITIAL_CHUNK - 1, endBlock);
-        const logs = await safeGetLogs(
-          provider,
-          {
-            address: VAULT_ADDRESS,
-            fromBlock,
-            toBlock,
-            topics: [
-              ethers.id("Mint(address,address,uint256,address,address)"), // Hypothetical Mint event
-              null, // sender
-              ethers.zeroPadValue(manager.toLowerCase(), 32), // manager
-              ethers.zeroPadValue(ethers.toBeHex(BigInt(tokenId)), 32) // Corrected tokenId encoding
-            ]
-          },
-          fromBlock,
-          toBlock
-        );
-        if (logs.length > 0) {
-          for (const log of logs) {
-            const [, , , token0, token1] = ethers.AbiCoder.defaultAbiCoder().decode(
-              ["address", "address", "uint256", "address", "address"],
-              log.data
-            );
-            console.log(`✅ Found Mint event for tokenId ${tokenId} at block ${log.blockNumber}, tx: ${log.transactionHash}`);
-            return { token0, token1 };
-          }
-        }
-      }
-      console.warn(`⚠️ No Mint event found for tokenId ${tokenId} on V4 manager ${manager} from block ${searchStartBlock} to ${endBlock}`);
-    } catch (e) {
-      console.warn(`⚠️ V4 token fetch error for tokenId ${tokenId} on manager ${manager}:`, e);
-    }
-    return { token0: ethers.ZeroAddress, token1: ethers.ZeroAddress };
-  }
-
-  // V3
   try {
-    const abi = [
-      "function positions(uint256) view returns (uint96,address,address,address,uint24,int24,int24,uint128,uint256,uint256,uint128,uint128)"
-    ];
-    const pos = await new ethers.Contract(manager, abi, provider).positions(tokenId);
+    const contract = new ethers.Contract(manager, abi, provider);
+    const pos = await contract.positions(tokenId);
+    console.log(`✅ Fetched position data for tokenId ${tokenId} on manager ${manager}`);
     return { token0: pos[2], token1: pos[3] };
   } catch (e) {
-    console.warn(`⚠️ V3 token fetch error for tokenId ${tokenId} on manager ${manager}:`, e);
+    console.warn(`⚠️ Token fetch error for tokenId ${tokenId} on manager ${manager}:`, e);
     return { token0: ethers.ZeroAddress, token1: ethers.ZeroAddress };
   }
 }
@@ -197,7 +154,7 @@ async function scanChain(chainName: string, rpcUrl: string) {
         const manager = "0x" + log.topics[2].slice(26);
         const tokenId = ethers.toBigInt(log.data).toString();
 
-        const { token0, token1 } = await fetchPositionTokens(manager, tokenId, provider, log.blockNumber);
+        const { token0, token1 } = await fetchPositionTokens(manager, tokenId, provider);
         const sym0    = await fetchTokenSymbol(token0, provider);
         const sym1    = await fetchTokenSymbol(token1, provider);
         const pair    = `${sym0}/${sym1}`;
