@@ -13,6 +13,7 @@ const START_BLOCK   = 33201394;
 
 // default chunk size for event scanning
 const INITIAL_CHUNK = 2000;
+const FALLBACK_CHUNK = 1000; // Reduced for FeesClaimed fallback
 const MAX_RETRIES = 3;
 const RETRY_DELAY = 1000;
 
@@ -40,17 +41,20 @@ async function fetchPositionTokens(
   manager: string,
   tokenId: string,
   provider: ethers.JsonRpcProvider,
-  burnBlock: number
+  burnBlock: number,
+  txHash: string
 ) {
   const isV4 = manager.toLowerCase() === V4_MANAGER.toLowerCase();
 
   // Validate tokenId ownership
+  let owner: string;
   try {
     const erc721Abi = ["function ownerOf(uint256) view returns (address)"];
     const contract = new ethers.Contract(manager, erc721Abi, provider);
-    const owner = await contract.ownerOf(tokenId);
+    owner = await contract.ownerOf(tokenId);
+    console.log(`ℹ️ tokenId ${tokenId} on manager ${manager} owned by ${owner}`);
     if (owner.toLowerCase() !== VAULT_ADDRESS.toLowerCase()) {
-      console.warn(`⚠️ tokenId ${tokenId} not owned by vault ${VAULT_ADDRESS} on manager ${manager}, owner: ${owner}`);
+      console.warn(`⚠️ tokenId ${tokenId} not owned by vault ${VAULT_ADDRESS}, owner: ${owner}`);
       return { token0: ethers.ZeroAddress, token1: ethers.ZeroAddress };
     }
   } catch (e) {
@@ -74,8 +78,8 @@ async function fetchPositionTokens(
 
     // Fallback to FeesClaimed event
     try {
-      const searchStartBlock = Math.max(START_BLOCK, burnBlock - INITIAL_CHUNK);
-      const searchEndBlock = burnBlock + INITIAL_CHUNK;
+      const searchStartBlock = Math.max(START_BLOCK, burnBlock - FALLBACK_CHUNK / 2);
+      const searchEndBlock = burnBlock + FALLBACK_CHUNK / 2;
       console.log(`🔍 Fallback: Searching FeesClaimed events for tokenId ${tokenId} from block ${searchStartBlock} to ${searchEndBlock}`);
       const logs = await safeGetLogs(
         provider,
@@ -106,6 +110,64 @@ async function fetchPositionTokens(
       console.warn(`⚠️ No FeesClaimed event found for tokenId ${tokenId} on manager ${manager} from block ${searchStartBlock} to ${searchEndBlock}`);
     } catch (e) {
       console.warn(`⚠️ FeesClaimed fetch error for tokenId ${tokenId} on manager ${manager}:`, e);
+    }
+
+    // Fallback to tracing NFTBurned transaction
+    try {
+      console.log(`🔍 Fallback: Tracing NFTBurned transaction ${txHash} for tokenId ${tokenId}`);
+      const tx = await provider.getTransaction(txHash);
+      if (tx && tx.data) {
+        // Decode burnNFT input (nftContract, tokenId)
+        const iface = new ethers.Interface(["function burnNFT(address nftContract, uint256 tokenId)"]);
+        const decoded = iface.parseTransaction({ data: tx.data });
+        if (decoded && decoded.name === "burnNFT" && decoded.args.nftContract.toLowerCase() === manager.toLowerCase()) {
+          // Check for related position creation (requires V4 manager ABI)
+          const receipt = await provider.getTransactionReceipt(txHash);
+          if (receipt && receipt.logs) {
+            for (const log of receipt.logs) {
+              // Look for Transfer or mint-related events from V4 manager
+              if (log.address.toLowerCase() === manager.toLowerCase()) {
+                try {
+                  const iface = new ethers.Interface([
+                    "event Transfer(address indexed from, address indexed to, uint256 indexed tokenId)"
+                  ]);
+                  const parsed = iface.parseLog(log);
+                  if (parsed && parsed.name === "Transfer" && parsed.args.tokenId.toString() === tokenId) {
+                    console.log(`ℹ️ Found Transfer event for tokenId ${tokenId} in tx ${txHash}`);
+                    // Need position creation event; try fetching from V4 manager logs
+                    const mintLogs = await safeGetLogs(
+                      provider,
+                      {
+                        address: manager,
+                        fromBlock: burnBlock - FALLBACK_CHUNK / 2,
+                        toBlock: burnBlock + FALLBACK_CHUNK / 2,
+                        topics: [
+                          null, // Assume mint event (unknown signature)
+                          null,
+                          null,
+                          ethers.zeroPadValue(ethers.toBeHex(BigInt(tokenId)), 32)
+                        ]
+                      },
+                      burnBlock - FALLBACK_CHUNK / 2,
+                      burnBlock + FALLBACK_CHUNK / 2
+                    );
+                    if (mintLogs.length > 0) {
+                      console.log(`✅ Found potential mint event for tokenId ${tokenId} at block ${mintLogs[0].blockNumber}, tx: ${mintLogs[0].transactionHash}`);
+                      // Requires V4 manager's mint event ABI to decode token0, token1
+                      return { token0: ethers.ZeroAddress, token1: ethers.ZeroAddress }; // Placeholder; update with actual decoding
+                    }
+                  }
+                } catch (e) {
+                  console.warn(`⚠️ Failed to parse log in tx ${txHash}:`, e);
+                }
+              }
+            }
+          }
+        }
+      }
+      console.warn(`⚠️ No position data found in NFTBurned tx ${txHash} for tokenId ${tokenId}`);
+    } catch (e) {
+      console.warn(`⚠️ Transaction tracing error for tokenId ${tokenId} on tx ${txHash}:`, e);
     }
     return { token0: ethers.ZeroAddress, token1: ethers.ZeroAddress };
   }
@@ -222,7 +284,7 @@ async function scanChain(chainName: string, rpcUrl: string) {
         const manager = "0x" + log.topics[2].slice(26);
         const tokenId = ethers.toBigInt(log.data).toString();
 
-        const { token0, token1 } = await fetchPositionTokens(manager, tokenId, provider, log.blockNumber);
+        const { token0, token1 } = await fetchPositionTokens(manager, tokenId, provider, log.blockNumber, txHash);
         const sym0    = await fetchTokenSymbol(token0, provider);
         const sym1    = await fetchTokenSymbol(token1, provider);
         const pair    = `${sym0}/${sym1}`;
