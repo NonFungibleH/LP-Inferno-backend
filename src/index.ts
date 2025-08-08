@@ -42,10 +42,10 @@ async function fetchPositionTokens(
   const isV4 = manager.toLowerCase() === V4_MANAGER.toLowerCase();
 
   if (isV4) {
-    // Try fetching token0 and token1 from FeesClaimed events
+    // Try fetching token0 and token1 from Mint events
     try {
       const endBlock = await provider.getBlockNumber();
-      console.log(`🔍 Searching FeesClaimed events for tokenId ${tokenId} from block ${START_BLOCK} to ${endBlock}`);
+      console.log(`🔍 Searching Mint events for tokenId ${tokenId} from block ${START_BLOCK} to ${endBlock}`);
       for (let fromBlock = START_BLOCK; fromBlock <= endBlock; fromBlock += INITIAL_CHUNK) {
         const toBlock = Math.min(fromBlock + INITIAL_CHUNK - 1, endBlock);
         const logs = await provider.getLogs({
@@ -53,24 +53,22 @@ async function fetchPositionTokens(
           fromBlock,
           toBlock,
           topics: [
-            ethers.id("FeesClaimed(address,address,uint256,address,address,uint256,uint256)")
+            ethers.id("Mint(address,address,uint256,address,address)"), // Hypothetical Mint event
+            null, // sender
+            ethers.zeroPadValue(manager.toLowerCase(), 32), // manager
+            ethers.zeroPadValue(BigInt(tokenId), 32) // tokenId
           ]
         });
         for (const log of logs) {
-          const [, nftAddr, tid, token0, token1] = ethers.AbiCoder.defaultAbiCoder().decode(
-            ["address", "address", "uint256", "address", "address", "uint256", "uint256"],
+          const [, , , token0, token1] = ethers.AbiCoder.defaultAbiCoder().decode(
+            ["address", "address", "uint256", "address", "address"],
             log.data
           );
-          if (
-            tid.toString() === tokenId &&
-            nftAddr.toLowerCase() === manager.toLowerCase()
-          ) {
-            console.log(`✅ Found FeesClaimed event for tokenId ${tokenId} at block ${log.blockNumber}`);
-            return { token0, token1 };
-          }
+          console.log(`✅ Found Mint event for tokenId ${tokenId} at block ${log.blockNumber}`);
+          return { token0, token1 };
         }
       }
-      console.warn(`⚠️ No FeesClaimed event found for tokenId ${tokenId} on V4 manager ${manager} from block ${START_BLOCK} to ${endBlock}`);
+      console.warn(`⚠️ No Mint event found for tokenId ${tokenId} on V4 manager ${manager} from block ${START_BLOCK} to ${endBlock}`);
     } catch (e) {
       console.warn(`⚠️ V4 token fetch error for tokenId ${tokenId} on manager ${manager}:`, e);
     }
