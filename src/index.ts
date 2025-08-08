@@ -1,4 +1,3 @@
-// src/index.ts
 import { ethers } from "ethers";
 import fs from "fs";
 import path from "path";
@@ -39,48 +38,17 @@ async function fetchPositionTokens(
   tokenId: string,
   provider: ethers.JsonRpcProvider
 ) {
-  const isV4 = manager.toLowerCase() === V4_MANAGER.toLowerCase();
+  // Unified ABI for positions (assumes V4 manager supports a similar positions function)
+  const positionAbi = [
+    "function positions(uint256) view returns (uint96 nonce, address operator, address token0, address token1, uint24 fee, int24 tickLower, int24 tickUpper, uint128 liquidity, uint256 feeGrowthInside0LastX128, uint256 feeGrowthInside1LastX128, uint128 tokensOwed0, uint128 tokensOwed1)"
+  ];
 
-  if (isV4) {
-    try {
-      const endBlock = await provider.getBlockNumber();
-      const logs = await provider.getLogs({
-        address: VAULT_ADDRESS,
-        fromBlock: Math.max(endBlock - 5000, START_BLOCK),
-        toBlock: endBlock,
-        topics: [
-          ethers.id(
-            "FeesClaimed(address,address,uint256,address,address,uint256,uint256)"
-          )
-        ]
-      });
-      for (const log of logs) {
-        const [ , nftAddr, tid, token0, token1 ] =
-          ethers.AbiCoder.defaultAbiCoder().decode(
-            ["address","address","uint256","address","address","uint256","uint256"],
-            log.data
-          );
-        if (
-          tid.toString() === tokenId &&
-          nftAddr.toLowerCase() === manager.toLowerCase()
-        ) {
-          return { token0, token1 };
-        }
-      }
-    } catch (e) {
-      console.warn("⚠️ V4 token fetch error:", e);
-    }
-    return { token0: ethers.ZeroAddress, token1: ethers.ZeroAddress };
-  }
-
-  // V3
   try {
-    const abi = [
-      "function positions(uint256) view returns (uint96,address,address,address,uint24,int24,int24,uint128,uint256,uint256,uint128,uint128)"
-    ];
-    const pos = await new ethers.Contract(manager, abi, provider).positions(tokenId);
-    return { token0: pos[2], token1: pos[3] };
-  } catch {
+    const contract = new ethers.Contract(manager, positionAbi, provider);
+    const pos = await contract.positions(tokenId);
+    return { token0: pos[2], token1: pos[3] }; // token0 and token1 are at indices 2 and 3
+  } catch (e) {
+    console.warn(`⚠️ Failed to fetch position for tokenId ${tokenId} on manager ${manager}:`, e);
     return { token0: ethers.ZeroAddress, token1: ethers.ZeroAddress };
   }
 }
