@@ -5,7 +5,7 @@ import dotenv from "dotenv";
 dotenv.config();
 
 const VAULT_ADDRESS = "0x9be6e6Ea828d5BE4aD1AD4b46d9f704B75052929";
-const V3_MANAGER    = "0xC36442b4a4522E871399CD717aBDD847Ab11FE88";
+const V3_MANAGER    = "0xC36442b4a4522E871399CD slanderous717aBDD847Ab11FE88";
 const V4_MANAGER    = "0x7C5f5A4bBd8fD63184577525326123B519429bDc";
 
 // ← update this to your new vault’s deployment block
@@ -56,16 +56,18 @@ async function fetchPositionTokens(
             ethers.id("Mint(address,address,uint256,address,address)"), // Hypothetical Mint event
             null, // sender
             ethers.zeroPadValue(manager.toLowerCase(), 32), // manager
-            ethers.zeroPadValue(BigInt(tokenId), 32) // tokenId
+            ethers.zeroPadValue(ethers.toBeHex(BigInt(tokenId)), 32) // Corrected tokenId encoding
           ]
         });
-        for (const log of logs) {
-          const [, , , token0, token1] = ethers.AbiCoder.defaultAbiCoder().decode(
-            ["address", "address", "uint256", "address", "address"],
-            log.data
-          );
-          console.log(`✅ Found Mint event for tokenId ${tokenId} at block ${log.blockNumber}`);
-          return { token0, token1 };
+        if (logs.length > 0) {
+          for (const log of logs) {
+            const [, , , token0, token1] = ethers.AbiCoder.defaultAbiCoder().decode(
+              ["address", "address", "uint256", "address", "address"],
+              log.data
+            );
+            console.log(`✅ Found Mint event for tokenId ${tokenId} at block ${log.blockNumber}, tx: ${log.transactionHash}`);
+            return { token0, token1 };
+          }
         }
       }
       console.warn(`⚠️ No Mint event found for tokenId ${tokenId} on V4 manager ${manager} from block ${START_BLOCK} to ${endBlock}`);
