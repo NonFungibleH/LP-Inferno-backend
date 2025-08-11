@@ -30,25 +30,23 @@ const ignoreSymbols = ["USDC","USDT","DAI","WETH","ETH","WBTC","BNB","MATIC"];
 // --- chain-specific helpers
 const BASE_WETH = "0x4200000000000000000000000000000000000006";
 const ETH_SENTINELS = new Set([
-  ethers.ZeroAddress.toLowerCase(),
-  "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+  "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee" // keep MetaMask sentinel only
 ]);
 
 // --- V4 support ---
-const V4_PM_ABI = [
-  // returns (owner, poolId, ...)
+const V4_PM_ABI_A = [
   "function positions(uint256) view returns (address owner, bytes32 poolId, int24, int24, uint128, uint256, uint256, uint256, uint256)"
 ];
-
+const V4_PM_ABI_B = [
+  "function positions(uint256) view returns (address owner, bytes32 poolId, int24 tickLower, int24 tickUpper, uint128 liquidity, uint160 feeGrowthInside0LastX128, uint160 feeGrowthInside1LastX128, uint128 tokensOwed0, uint128 tokensOwed1)"
+];
 const V4_POOLMANAGER_ABI = [
-  // we only need currency0 and currency1
   "function pools(bytes32) view returns (address currency0, address currency1, uint24 fee, address hooks, int24 tickSpacing, uint8 unlocked, uint8 protocolFee, uint8 lpFee)"
 ];
-
 // Fallback Base PoolManager (from your notes)
 const BASE_V4_POOL_MANAGER = "0x1631559198a9e474033433b2958dabc135ab6446";
 
-// Try to read PoolManager from the PositionManager itself
+// Try to read PoolManager from PM
 async function getPoolManagerAddr(pmAddr: string, provider: ethers.JsonRpcProvider): Promise<string> {
   const tryABIs = [
     ["function manager() view returns (address)", "manager"],
@@ -62,7 +60,7 @@ async function getPoolManagerAddr(pmAddr: string, provider: ethers.JsonRpcProvid
       if (ethers.isAddress(addr)) return addr;
     } catch {}
   }
-  return BASE_V4_POOL_MANAGER; // last resort
+  return BASE_V4_POOL_MANAGER;
 }
 
 // ---------- Robust symbol() with fallbacks + cache ----------
@@ -74,9 +72,7 @@ const NAME_ABI_BYTES32   = ["function name() view returns (bytes32)"];
 const symbolCache = new Map<string, string>();
 
 function cleanBytes32ToString(b: string): string {
-  try {
-    return ethers.decodeBytes32String(b);
-  } catch {
+  try { return ethers.decodeBytes32String(b); } catch {
     try {
       const raw = ethers.hexlify(b);
       const bytes = ethers.getBytes(raw);
@@ -84,16 +80,12 @@ function cleanBytes32ToString(b: string): string {
       while (end > 0 && bytes[end - 1] === 0) end--;
       const trimmed = new Uint8Array(bytes.slice(0, end));
       return new TextDecoder().decode(trimmed);
-    } catch {
-      return "";
-    }
+    } catch { return ""; }
   }
 }
 
 async function trySymbol(addr: string, provider: ethers.JsonRpcProvider): Promise<string | null> {
-  try {
-    return await new ethers.Contract(addr, SYMBOL_ABI_STRING, provider).symbol();
-  } catch {}
+  try { return await new ethers.Contract(addr, SYMBOL_ABI_STRING, provider).symbol(); } catch {}
   try {
     const bytes: string = await new ethers.Contract(addr, SYMBOL_ABI_BYTES32, provider).symbol();
     const s = cleanBytes32ToString(bytes);
@@ -103,9 +95,7 @@ async function trySymbol(addr: string, provider: ethers.JsonRpcProvider): Promis
 }
 
 async function tryName(addr: string, provider: ethers.JsonRpcProvider): Promise<string | null> {
-  try {
-    return await new ethers.Contract(addr, NAME_ABI_STRING, provider).name();
-  } catch {}
+  try { return await new ethers.Contract(addr, NAME_ABI_STRING, provider).name(); } catch {}
   try {
     const bytes: string = await new ethers.Contract(addr, NAME_ABI_BYTES32, provider).name();
     const n = cleanBytes32ToString(bytes);
@@ -122,7 +112,7 @@ async function fetchTokenSymbol(address: string, provider: ethers.JsonRpcProvide
   if (ETH_SENTINELS.has(addr)) return "ETH";
   if (addr === BASE_WETH.toLowerCase()) return "WETH";
 
-  if (addr === ethers.ZeroAddress) return "???";
+  if (addr === ethers.ZeroAddress) return "???"; // keep zero visible as failure
   if (symbolCache.has(addr)) return symbolCache.get(addr)!;
 
   let sym = await trySymbol(addr, provider);
@@ -164,36 +154,44 @@ async function fetchPositionTokens(
   if (isV4) {
     // Proper V4 flow: positions() -> poolId -> PoolManager.pools(poolId)
     try {
-      const pm = new ethers.Contract(manager, V4_PM_ABI, provider);
-      const pos: any = await pm.positions(tokenId);
+      let pos: any;
+      try {
+        const pmA = new ethers.Contract(manager, V4_PM_ABI_A, provider);
+        pos = await pmA.positions(tokenId);
+        console.log(`V4 positions(A) raw ->`, pos);
+      } catch {
+        const pmB = new ethers.Contract(manager, V4_PM_ABI_B, provider);
+        pos = await pmB.positions(tokenId);
+        console.log(`V4 positions(B) raw ->`, pos);
+      }
 
-      // poolId may be at pos.poolId or pos[1]
       const poolId: string | undefined = pos?.poolId ?? pos?.[1];
       if (!poolId || !/^0x[0-9a-fA-F]{64}$/.test(poolId)) {
-        console.warn(`⚠️ Unexpected positions() shape for tokenId ${tokenId}. pos keys: ${Object.keys(pos || {})}`);
+        console.warn(`⚠️ Unexpected positions() shape for tokenId ${tokenId}. keys: ${Object.keys(pos || {})}`);
         throw new Error("Bad poolId from positions()");
       }
 
       const poolManagerAddr = await getPoolManagerAddr(manager, provider);
-      if (!ethers.isAddress(poolManagerAddr)) throw new Error(`Bad PoolManager address: ${poolManagerAddr}`);
+      console.log(`V4 PoolManager resolved ->`, poolManagerAddr);
 
       const poolMgr = new ethers.Contract(poolManagerAddr, V4_POOLMANAGER_ABI, provider);
       const pool: any = await poolMgr.pools(poolId);
+      console.log(`V4 pool(${poolId}) ->`, pool);
 
       const token0: string | undefined = pool?.currency0 ?? pool?.[0];
       const token1: string | undefined = pool?.currency1 ?? pool?.[1];
-      if (!token0 || !token1 || !ethers.isAddress(token0) || !ethers.isAddress(token1)) {
+      if (!token0 || !ethers.isAddress(token0) || !token1 || !ethers.isAddress(token1)) {
         console.warn(`⚠️ Invalid currencies in PoolManager.pools(${poolId}) →`, pool);
         throw new Error("Invalid currencies");
       }
 
-      console.log(`✅ V4: poolId ${poolId} @ ${poolManagerAddr} → token0=${token0}, token1=${token1}`);
+      console.log(`✅ V4 resolved -> token0=${token0}, token1=${token1}`);
       return { token0, token1 };
     } catch (e) {
       console.warn(`⚠️ V4 resolution failed for tokenId ${tokenId} on manager ${manager}:`, e);
     }
 
-    // Fallback to FeesClaimed event
+    // Fallback to FeesClaimed (unchanged)
     try {
       const searchStartBlock = Math.max(START_BLOCK, burnBlock - Math.floor(FALLBACK_CHUNK / 2));
       const searchEndBlock = burnBlock + Math.floor(FALLBACK_CHUNK / 2);
@@ -206,9 +204,9 @@ async function fetchPositionTokens(
           toBlock: searchEndBlock,
           topics: [
             ethers.id("FeesClaimed(address,address,uint256,address,address,uint256,uint256)"),
-            null, // user
-            ethers.zeroPadValue(manager.toLowerCase(), 32), // nft
-            ethers.zeroPadValue(ethers.toBeHex(BigInt(tokenId)), 32) // tokenId
+            null,
+            ethers.zeroPadValue(manager.toLowerCase(), 32),
+            ethers.zeroPadValue(ethers.toBeHex(BigInt(tokenId)), 32)
           ]
         },
         searchStartBlock,
@@ -220,30 +218,15 @@ async function fetchPositionTokens(
             ["address", "address", "uint256", "address", "address", "uint256", "uint256"],
             log.data
           );
-          console.log(`✅ Found FeesClaimed event for tokenId ${tokenId} at block ${log.blockNumber}, tx: ${log.transactionHash}`);
+          console.log(`✅ FeesClaimed backfill for tokenId ${tokenId} at block ${log.blockNumber}, tx: ${log.transactionHash}`);
           return { token0, token1 };
         }
       }
-      console.warn(`⚠️ No FeesClaimed event found for tokenId ${tokenId} on manager ${manager} from block ${searchStartBlock} to ${searchEndBlock}`);
+      console.warn(`⚠️ No FeesClaimed event found for tokenId ${tokenId}`);
     } catch (e) {
-      console.warn(`⚠️ FeesClaimed fetch error for tokenId ${tokenId} on manager ${manager}:`, e);
+      console.warn(`⚠️ FeesClaimed fetch error for tokenId ${tokenId}:`, e);
     }
 
-    // Fallback to tracing NFTBurned transaction (kept minimal)
-    try {
-      console.log(`🔍 Fallback: Tracing NFTBurned transaction ${txHash} for tokenId ${tokenId}`);
-      const tx = await provider.getTransaction(txHash);
-      if (tx?.data) {
-        const iface = new ethers.Interface(["function burnNFT(address nftContract, uint256 tokenId)"]);
-        const decoded = iface.parseTransaction({ data: tx.data });
-        if (decoded && decoded.name === "burnNFT" && decoded.args.nftContract.toLowerCase() === manager.toLowerCase()) {
-          return { token0: ethers.ZeroAddress, token1: ethers.ZeroAddress };
-        }
-      }
-      console.warn(`⚠️ No position data found in NFTBurned tx ${txHash} for tokenId ${tokenId}`);
-    } catch (e) {
-      console.warn(`⚠️ Transaction tracing error for tokenId ${tokenId} on tx ${txHash}:`, e);
-    }
     return { token0: ethers.ZeroAddress, token1: ethers.ZeroAddress };
   }
 
@@ -254,7 +237,7 @@ async function fetchPositionTokens(
     ];
     const contract = new ethers.Contract(manager, abi, provider);
     const pos = await contract.positions(tokenId);
-    console.log(`✅ Fetched position data for tokenId ${tokenId} on manager ${manager}`);
+    console.log(`✅ V3: token0=${pos[2]}, token1=${pos[3]}`);
     return { token0: pos[2], token1: pos[3] };
   } catch (e) {
     console.warn(`⚠️ V3 token fetch error for tokenId ${tokenId} on manager ${manager}:`, e);
@@ -279,11 +262,7 @@ async function safeGetLogs(
         toBlock
       });
     } catch (err: any) {
-      if (
-        err?.message &&
-        (err.message.includes("block range") || err.message.includes("ETIMEDOUT")) &&
-        chunkSize > 1
-      ) {
+      if (err?.message && (err.message.includes("block range") || err.message.includes("ETIMEDOUT")) && chunkSize > 1) {
         chunkSize = Math.floor(chunkSize / 2);
         toBlock = fromBlock + chunkSize;
         retries++;
