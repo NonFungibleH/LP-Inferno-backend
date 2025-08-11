@@ -120,7 +120,7 @@ async function scanVault() {
   }
 
   // ---- Save to vault.json ----
-  const filePath = path.join("data", "vault.json");
+  const filePath = path.join("public", "data", "vault.json");
   fs.writeFileSync(filePath, JSON.stringify(results, null, 2));
   console.log(`✅ Saved ${results.length} records to ${filePath}`);
 }
