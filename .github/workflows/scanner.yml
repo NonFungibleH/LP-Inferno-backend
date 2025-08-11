@@ -32,13 +32,13 @@ jobs:
           BASE_RPC: ${{ secrets.BASE_RPC }}
 
       - name: Push vault.json to frontend repo
-  run: |
-    git clone https://x-access-token:${{ secrets.FRONTEND_PAT }}@github.com/NonFungibleH/LP-Inferno.git
-    cd LP-Inferno
-    mkdir -p public/data
-    cp ../data/vault.json public/data/vault.json          # ← copy into NEW location
-    git config user.name "github-actions[bot]"
-    git config user.email "github-actions[bot]@users.noreply.github.com"
-    git add public/data/vault.json                        # ← stage NEW file
-    git commit -m "Update vault.json from backend scan" || echo "Nothing to commit"
-    git push origin main
+        run: |
+          git clone https://x-access-token:${{ secrets.FRONTEND_PAT }}@github.com/NonFungibleH/LP-Inferno.git
+          cd LP-Inferno
+          mkdir -p public/data
+          cp ../data/vault.json public/data/vault.json
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add public/data/vault.json
+          git commit -m "Update vault.json from backend scan" || echo "Nothing to commit"
+          git push origin main
