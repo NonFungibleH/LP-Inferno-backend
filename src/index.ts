@@ -318,7 +318,7 @@ async function runMultichainScan() {
     allVaults = allVaults.concat(entries);
   }
 
-  const outputPath = new URL("../data/vault.json", import.meta.url).pathname;
+  const outputPath = new URL("../public/data/vault.json", import.meta.url).pathname;
   fs.mkdirSync(path.dirname(outputPath), { recursive: true });
   fs.writeFileSync(outputPath, JSON.stringify(allVaults, null, 2));
   console.log(`✅ Saved ${allVaults.length} entries to vault.json`);
