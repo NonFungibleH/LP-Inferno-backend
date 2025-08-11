@@ -27,6 +27,13 @@ const CHAINS = [
 
 const ignoreSymbols = ["USDC","USDT","DAI","WETH","ETH","WBTC","BNB","MATIC"];
 
+// --- chain-specific helpers
+const BASE_WETH = "0x4200000000000000000000000000000000000006";
+const ETH_SENTINELS = new Set([
+  ethers.ZeroAddress.toLowerCase(),
+  "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+]);
+
 // --- V4 support ---
 const V4_PM_ABI = [
   // returns (owner, poolId, ...)
@@ -38,8 +45,25 @@ const V4_POOLMANAGER_ABI = [
   "function pools(bytes32) view returns (address currency0, address currency1, uint24 fee, address hooks, int24 tickSpacing, uint8 unlocked, uint8 protocolFee, uint8 lpFee)"
 ];
 
-// Base PoolManager (from your notes)
+// Fallback Base PoolManager (from your notes)
 const BASE_V4_POOL_MANAGER = "0x1631559198a9e474033433b2958dabc135ab6446";
+
+// Try to read PoolManager from the PositionManager itself
+async function getPoolManagerAddr(pmAddr: string, provider: ethers.JsonRpcProvider): Promise<string> {
+  const tryABIs = [
+    ["function manager() view returns (address)", "manager"],
+    ["function poolManager() view returns (address)", "poolManager"]
+  ] as const;
+
+  for (const [sig, fn] of tryABIs) {
+    try {
+      const c = new ethers.Contract(pmAddr, [sig], provider);
+      const addr: string = await (c as any)[fn]();
+      if (ethers.isAddress(addr)) return addr;
+    } catch {}
+  }
+  return BASE_V4_POOL_MANAGER; // last resort
+}
 
 // ---------- Robust symbol() with fallbacks + cache ----------
 const SYMBOL_ABI_STRING  = ["function symbol() view returns (string)"];
@@ -51,13 +75,11 @@ const symbolCache = new Map<string, string>();
 
 function cleanBytes32ToString(b: string): string {
   try {
-    // Prefer ethers decode; fall back to manual trim if needed
     return ethers.decodeBytes32String(b);
   } catch {
     try {
       const raw = ethers.hexlify(b);
       const bytes = ethers.getBytes(raw);
-      // trim trailing nulls
       let end = bytes.length;
       while (end > 0 && bytes[end - 1] === 0) end--;
       const trimmed = new Uint8Array(bytes.slice(0, end));
@@ -94,13 +116,19 @@ async function tryName(addr: string, provider: ethers.JsonRpcProvider): Promise<
 
 async function fetchTokenSymbol(address: string, provider: ethers.JsonRpcProvider) {
   const addr = address?.toLowerCase?.() ?? address;
-  if (!addr || addr === ethers.ZeroAddress) return "???";
+  if (!addr) return "???";
+
+  // Handle native ETH sentinel & Base WETH
+  if (ETH_SENTINELS.has(addr)) return "ETH";
+  if (addr === BASE_WETH.toLowerCase()) return "WETH";
+
+  if (addr === ethers.ZeroAddress) return "???";
   if (symbolCache.has(addr)) return symbolCache.get(addr)!;
 
   let sym = await trySymbol(addr, provider);
   if (!sym || sym.length > 32) {
     const name = await tryName(addr, provider);
-    if (name && name.length <= 12) sym = name; // short name as last-ditch "symbol"
+    if (name && name.length <= 12) sym = name;
   }
 
   if (!sym || !/^[\x20-\x7E]+$/.test(sym)) sym = "???";
@@ -119,11 +147,10 @@ async function fetchPositionTokens(
   const isV4 = manager.toLowerCase() === V4_MANAGER.toLowerCase();
 
   // Validate tokenId ownership
-  let owner: string;
   try {
     const erc721Abi = ["function ownerOf(uint256) view returns (address)"];
     const contract = new ethers.Contract(manager, erc721Abi, provider);
-    owner = await contract.ownerOf(tokenId);
+    const owner: string = await contract.ownerOf(tokenId);
     console.log(`ℹ️ tokenId ${tokenId} on manager ${manager} owned by ${owner}`);
     if (owner.toLowerCase() !== VAULT_ADDRESS.toLowerCase()) {
       console.warn(`⚠️ tokenId ${tokenId} not owned by vault ${VAULT_ADDRESS}, owner: ${owner}`);
@@ -138,16 +165,32 @@ async function fetchPositionTokens(
     // Proper V4 flow: positions() -> poolId -> PoolManager.pools(poolId)
     try {
       const pm = new ethers.Contract(manager, V4_PM_ABI, provider);
-      const pos = await pm.positions(tokenId);
-      const poolId: string = pos[1];
-      const poolMgr = new ethers.Contract(BASE_V4_POOL_MANAGER, V4_POOLMANAGER_ABI, provider);
-      const pool = await poolMgr.pools(poolId);
-      const token0: string = pool.currency0;
-      const token1: string = pool.currency1;
-      console.log(`✅ V4: poolId ${poolId} → token0=${token0}, token1=${token1}`);
+      const pos: any = await pm.positions(tokenId);
+
+      // poolId may be at pos.poolId or pos[1]
+      const poolId: string | undefined = pos?.poolId ?? pos?.[1];
+      if (!poolId || !/^0x[0-9a-fA-F]{64}$/.test(poolId)) {
+        console.warn(`⚠️ Unexpected positions() shape for tokenId ${tokenId}. pos keys: ${Object.keys(pos || {})}`);
+        throw new Error("Bad poolId from positions()");
+      }
+
+      const poolManagerAddr = await getPoolManagerAddr(manager, provider);
+      if (!ethers.isAddress(poolManagerAddr)) throw new Error(`Bad PoolManager address: ${poolManagerAddr}`);
+
+      const poolMgr = new ethers.Contract(poolManagerAddr, V4_POOLMANAGER_ABI, provider);
+      const pool: any = await poolMgr.pools(poolId);
+
+      const token0: string | undefined = pool?.currency0 ?? pool?.[0];
+      const token1: string | undefined = pool?.currency1 ?? pool?.[1];
+      if (!token0 || !token1 || !ethers.isAddress(token0) || !ethers.isAddress(token1)) {
+        console.warn(`⚠️ Invalid currencies in PoolManager.pools(${poolId}) →`, pool);
+        throw new Error("Invalid currencies");
+      }
+
+      console.log(`✅ V4: poolId ${poolId} @ ${poolManagerAddr} → token0=${token0}, token1=${token1}`);
       return { token0, token1 };
     } catch (e) {
-      console.warn(`⚠️ V4 pool resolution failed for tokenId ${tokenId} on manager ${manager}:`, e);
+      console.warn(`⚠️ V4 resolution failed for tokenId ${tokenId} on manager ${manager}:`, e);
     }
 
     // Fallback to FeesClaimed event
@@ -186,34 +229,15 @@ async function fetchPositionTokens(
       console.warn(`⚠️ FeesClaimed fetch error for tokenId ${tokenId} on manager ${manager}:`, e);
     }
 
-    // Fallback to tracing NFTBurned transaction (kept as in your original)
+    // Fallback to tracing NFTBurned transaction (kept minimal)
     try {
       console.log(`🔍 Fallback: Tracing NFTBurned transaction ${txHash} for tokenId ${tokenId}`);
       const tx = await provider.getTransaction(txHash);
-      if (tx && tx.data) {
+      if (tx?.data) {
         const iface = new ethers.Interface(["function burnNFT(address nftContract, uint256 tokenId)"]);
         const decoded = iface.parseTransaction({ data: tx.data });
         if (decoded && decoded.name === "burnNFT" && decoded.args.nftContract.toLowerCase() === manager.toLowerCase()) {
-          const receipt = await provider.getTransactionReceipt(txHash);
-          if (receipt && receipt.logs) {
-            for (const log of receipt.logs) {
-              if (log.address.toLowerCase() === manager.toLowerCase()) {
-                try {
-                  const iface = new ethers.Interface([
-                    "event Transfer(address indexed from, address indexed to, uint256 indexed tokenId)"
-                  ]);
-                  const parsed = iface.parseLog(log);
-                  if (parsed && parsed.name === "Transfer" && parsed.args.tokenId.toString() === tokenId) {
-                    console.log(`ℹ️ Found Transfer event for tokenId ${tokenId} in tx ${txHash}`);
-                    // We could search mint logs here; left as placeholder
-                    return { token0: ethers.ZeroAddress, token1: ethers.ZeroAddress };
-                  }
-                } catch (e) {
-                  console.warn(`⚠️ Failed to parse log in tx ${txHash}:`, e);
-                }
-              }
-            }
-          }
+          return { token0: ethers.ZeroAddress, token1: ethers.ZeroAddress };
         }
       }
       console.warn(`⚠️ No position data found in NFTBurned tx ${txHash} for tokenId ${tokenId}`);
@@ -378,3 +402,4 @@ async function runMultichainScan() {
 }
 
 runMultichainScan().catch(console.error);
+h(console.error);
