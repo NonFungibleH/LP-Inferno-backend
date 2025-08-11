@@ -276,7 +276,7 @@ async function scanChain(chainName: string, rpcUrl: string) {
           sender,
           txHash,
           timestamp,
-          vault: VAULT_ADDRESS
+          vault: VAULT_ADDRESS,
           chain: chainName
         });
 
@@ -303,7 +303,7 @@ async function scanChain(chainName: string, rpcUrl: string) {
           sender,
           txHash,
           timestamp,
-          vault: VAULT_ADDRESS
+          vault: VAULT_ADDRESS,
           chain: chainName
         });
       }
