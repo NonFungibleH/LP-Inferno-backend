@@ -401,5 +401,7 @@ async function runMultichainScan() {
   console.log(`✅ Saved ${allVaults.length} entries to vault.json`);
 }
 
-runMultichainScan().catch(console.error);
-h(console.error);
+runMultichainScan().catch((err) => {
+  console.error(err);
+  process.exit(1);
+});
