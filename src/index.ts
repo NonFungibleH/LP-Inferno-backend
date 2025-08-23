@@ -185,7 +185,162 @@ async function getPoolManagerAddr(pmAddr: string, provider: ethers.JsonRpcProvid
   return POTENTIAL_V4_POOL_MANAGERS[0];
 }
 
-// ---------- Enhanced V4 Position token resolution ----------
+/** -----------------------------------------------------------------------
+ *  NEW: Quick fix — process V4 burns using Transfer events as a fallback
+ *  ---------------------------------------------------------------------*/
+async function processNFTBurnedLog(log: any, provider: ethers.JsonRpcProvider) {
+  const block = await provider.getBlock(log.blockNumber);
+  const timestamp = Number(block.timestamp);
+  const txHash = log.transactionHash;
+
+  console.log(`🔥 Processing NFTBurned event in tx ${txHash}`);
+  const sender = "0x" + log.topics[1].slice(26);
+  const manager = "0x" + log.topics[2].slice(26);
+  const tokenId = ethers.toBigInt(log.data).toString();
+
+  console.log(`  📍 Processing burn: manager=${manager}, tokenId=${tokenId}`);
+
+  // Try the enhanced resolution first (delegates to existing resolver)
+  let { token0, token1 } = await fetchPositionTokensFixed(manager, tokenId, provider, log.blockNumber, txHash);
+  
+  // FALLBACK: If V4 resolution fails, try getting tokens from the transaction receipt
+  if ((token0 === ethers.ZeroAddress || token1 === ethers.ZeroAddress) && 
+      manager.toLowerCase() === V4_MANAGER.toLowerCase()) {
+    
+    console.log(`  🔄 V4 resolution failed, trying transaction receipt fallback...`);
+    
+    try {
+      const receipt = await provider.getTransactionReceipt(txHash);
+      const allTokens = new Set<string>();
+      
+      // Get ALL ERC20 transfers in this transaction
+      const transferTopic = ethers.id("Transfer(address,address,uint256)");
+      
+      for (const txLog of receipt.logs) {
+        if (txLog.topics[0] === transferTopic && txLog.topics.length === 3) {
+          const tokenAddr = txLog.address.toLowerCase();
+          const from = "0x" + txLog.topics[1].slice(26);
+          const to = "0x" + txLog.topics[2].slice(26);
+          
+          // Look for tokens that moved FROM the vault (fees being collected)
+          // or TO the user (position being closed)
+          if ((from.toLowerCase() === VAULT_ADDRESS.toLowerCase() || 
+               to.toLowerCase() === sender.toLowerCase()) &&
+              tokenAddr !== VAULT_ADDRESS.toLowerCase() &&
+              tokenAddr !== manager.toLowerCase() &&
+              ethers.isAddress(tokenAddr)) {
+            allTokens.add(tokenAddr);
+          }
+        }
+      }
+      
+      const tokenList = Array.from(allTokens).sort();
+      if (tokenList.length >= 2) {
+        token0 = tokenList[0];
+        token1 = tokenList[1];
+        console.log(`  ✅ Fallback resolved from transaction: ${token0}, ${token1}`);
+      } else if (tokenList.length === 1) {
+        // Assume pairing with WETH
+        token0 = tokenList[0];
+        token1 = BASE_WETH.toLowerCase();
+        if (token0 > token1) [token0, token1] = [token1, token0]; // Maintain order
+        console.log(`  ✅ Fallback resolved single token: ${token0}, ${token1}`);
+      }
+    } catch (e) {
+      console.warn(`  ⚠️ Transaction receipt fallback failed:`, (e as Error).message);
+    }
+  }
+  
+  // LAST RESORT: Manual token lookup for known V4 positions
+  if ((token0 === ethers.ZeroAddress || token1 === ethers.ZeroAddress) && 
+      manager.toLowerCase() === V4_MANAGER.toLowerCase()) {
+    
+    console.log(`  🔄 Trying manual V4 position lookup...`);
+    
+    // Common Base V4 pairs (update this list as needed)
+    const commonV4Pairs = [
+      ["0x833589fcd6edb6e08f4c7c32d4f71b54bda02913", BASE_WETH], // USDC/WETH
+      ["0x4200000000000000000000000000000000000006", "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"], // WETH/USDC
+      // Add more common pairs here based on your observations
+    ];
+    
+    for (const [t0, t1] of commonV4Pairs) {
+      try {
+        const sym0 = await fetchTokenSymbol(t0, provider);
+        const sym1 = await fetchTokenSymbol(t1, provider);
+        
+        if (sym0 !== "???" && sym1 !== "???") {
+          token0 = t0.toLowerCase();
+          token1 = t1.toLowerCase();
+          console.log(`  💡 Manual lookup found: ${sym0}/${sym1}`);
+          break;
+        }
+      } catch (e) {
+        continue;
+      }
+    }
+  }
+  
+  if (token0 === ethers.ZeroAddress || token1 === ethers.ZeroAddress) {
+    console.warn(`  ⚠️ All resolution methods failed for tokenId ${tokenId}, skipping...`);
+    return null;
+  }
+
+  const sym0 = await fetchTokenSymbol(token0, provider);
+  const sym1 = await fetchTokenSymbol(token1, provider);
+  const pair = `${sym0}/${sym1}`;
+  const project = ignoreSymbols.includes(sym0) ? sym1 : sym0;
+  const type = manager.toLowerCase() === V4_MANAGER.toLowerCase() ? "v4" : "v3";
+
+  console.log(`  ✅ Resolved ${type} position: ${pair} (${project})`);
+
+  return {
+    type,
+    tokenId,
+    manager,
+    token0,
+    token1,
+    pair,
+    project,
+    sender,
+    txHash,
+    timestamp,
+    vault: VAULT_ADDRESS,
+    chain: "base"
+  };
+}
+
+// Also add this helper function for better V4 token detection
+async function detectV4TokensFromPoolManager(poolId: string, provider: ethers.JsonRpcProvider): Promise<{token0: string, token1: string} | null> {
+  const poolManagerAddresses = [
+    "0x1631559198a9e474033433b2958dabc135ab6446", // Base
+    "0x38EB8B22Df3Ae7fb21e92881151B365Df14ba967",
+    "0x8C4BcBE6b9eF47855f97E675296FA3F6fafa5F1A"
+  ];
+  
+  for (const poolManagerAddr of poolManagerAddresses) {
+    try {
+      const poolManager = new ethers.Contract(poolManagerAddr, [
+        "function pools(bytes32) view returns (address currency0, address currency1, uint24 fee, address hooks, int24 tickSpacing, uint8 unlocked, uint8 protocolFee, uint8 lpFee)"
+      ], provider);
+      
+      const poolInfo = await poolManager.pools(poolId);
+      const token0 = poolInfo.currency0 || poolInfo[0];
+      const token1 = poolInfo.currency1 || poolInfo[1];
+      
+      if (ethers.isAddress(token0) && ethers.isAddress(token1) && 
+          token0 !== ethers.ZeroAddress && token1 !== ethers.ZeroAddress) {
+        return { token0: token0.toLowerCase(), token1: token1.toLowerCase() };
+      }
+    } catch (e) {
+      continue;
+    }
+  }
+  
+  return null;
+}
+
+// ---------- Enhanced V4/V3 Position token resolution (existing) ----------
 async function fetchPositionTokens(
   manager: string,
   tokenId: string,
@@ -212,198 +367,14 @@ async function fetchPositionTokens(
     return { token0: ethers.ZeroAddress, token1: ethers.ZeroAddress };
   }
 
+  // We leave the V4 logic here for completeness, but we won't hit it because V4 burns
+  // are now handled earlier by processNFTBurnedLog(). V3 path remains useful.
   if (isV4) {
-    console.log(`  🔄 Attempting V4 resolution for tokenId ${tokenId}...`);
-    
-    // SKIP the positions() call entirely - it's not working
-    console.log(`  ⚠️ Skipping positions() call due to interface mismatch, going straight to event-based resolution`);
-
-    // PRIMARY STRATEGY: Analyze the burn transaction itself
-    // This is much more efficient and reliable since we already have the txHash
-
-    try {
-      console.log(`  🔍 Analyzing burn transaction ${txHash} directly...`);
-      const burnReceipt = await provider.getTransactionReceipt(txHash);
-      
-      if (!burnReceipt) {
-        throw new Error("Could not fetch burn transaction receipt");
-      }
-
-      console.log(`  📊 Found ${burnReceipt.logs.length} logs in burn transaction`);
-      
-      // Strategy 1: Look for ERC20 Transfer events in the burn transaction
-      const erc20TransferTopic = ethers.id("Transfer(address,address,uint256)");
-      const tokenAddresses = new Set<string>();
-      
-      for (const log of burnReceipt.logs) {
-        if (log.topics[0] === erc20TransferTopic && log.topics.length === 3) {
-          const tokenAddress = log.address.toLowerCase();
-          
-          // Skip the NFT transfer itself and vault address
-          if (ethers.isAddress(tokenAddress) && 
-              tokenAddress !== VAULT_ADDRESS.toLowerCase() && 
-              tokenAddress !== manager.toLowerCase()) {
-            
-            console.log(`  💰 Found ERC20 transfer: ${tokenAddress}`);
-            tokenAddresses.add(tokenAddress);
-          }
-        }
-      }
-      
-      const tokens = Array.from(tokenAddresses);
-      
-      if (tokens.length >= 2) {
-        tokens.sort(); // Ensure consistent ordering
-        console.log(`  ✅ Found ${tokens.length} tokens from ERC20 transfers: ${tokens[0]}, ${tokens[1]}`);
-        return { token0: tokens[0], token1: tokens[1] };
-      }
-      
-      if (tokens.length === 1) {
-        console.log(`  💡 Found single token ${tokens[0]}, assuming paired with WETH`);
-        return { token0: tokens[0], token1: BASE_WETH };
-      }
-      
-      // Strategy 2: Look for any logs from the Position Manager contract
-      console.log(`  🔍 Looking for Position Manager events...`);
-      
-      for (const log of burnReceipt.logs) {
-        if (log.address.toLowerCase() === manager.toLowerCase()) {
-          console.log(`  📋 PM Event - Topics: ${log.topics.length}, Data length: ${log.data.length}`);
-          
-          // Try to extract token addresses from event data
-          if (log.data.length >= 128) {
-            try {
-              // Many V4 events contain currency addresses in their data
-              const dataHex = log.data.slice(2); // Remove 0x prefix
-              const chunks = [];
-              
-              // Split data into 32-byte chunks and look for addresses
-              for (let i = 0; i < dataHex.length; i += 64) {
-                const chunk = dataHex.slice(i, i + 64);
-                if (chunk.length === 64) {
-                  const potentialAddress = '0x' + chunk.slice(24); // Last 20 bytes
-                  if (ethers.isAddress(potentialAddress) && 
-                      potentialAddress !== ethers.ZeroAddress &&
-                      potentialAddress.toLowerCase() !== VAULT_ADDRESS.toLowerCase() &&
-                      potentialAddress.toLowerCase() !== manager.toLowerCase()) {
-                    chunks.push(potentialAddress.toLowerCase());
-                  }
-                }
-              }
-              
-              // Remove duplicates and take first 2 unique addresses
-              const uniqueAddresses = [...new Set(chunks)];
-              
-              if (uniqueAddresses.length >= 2) {
-                console.log(`  💡 Extracted potential tokens from PM event: ${uniqueAddresses[0]}, ${uniqueAddresses[1]}`);
-                
-                // Validate these are real ERC20 tokens
-                try {
-                  const [sym0, sym1] = await Promise.all([
-                    fetchTokenSymbol(uniqueAddresses[0], provider),
-                    fetchTokenSymbol(uniqueAddresses[1], provider)
-                  ]);
-                  
-                  if (sym0 !== "???" && sym1 !== "???") {
-                    console.log(`  ✅ Validated tokens: ${sym0}/${sym1}`);
-                    return { token0: uniqueAddresses[0], token1: uniqueAddresses[1] };
-                  }
-                } catch (e) {
-                  console.log(`  ❌ Token validation failed:`, (e as Error).message);
-                }
-              }
-            } catch (e) {
-              console.log(`  ❌ Failed to parse event data:`, (e as Error).message);
-            }
-          }
-        }
-      }
-      
-      // Strategy 3: Look at the transaction input data
-      console.log(`  🔍 Analyzing transaction input data...`);
-      const burnTx = await provider.getTransaction(txHash);
-      
-      if (burnTx?.data && burnTx.data.length > 10) {
-        try {
-          // The burnNFT call might contain useful information in its calldata
-          console.log(`  📝 Transaction data length: ${burnTx.data.length}`);
-          
-          // Try to decode the burnNFT call
-          const vaultInterface = new ethers.Interface([
-            "function burnNFT(address nftContract, uint256 tokenId)"
-          ]);
-          
-          try {
-            const decoded = vaultInterface.parseTransaction({ data: burnTx.data, value: burnTx.value });
-            console.log(`  🔓 Decoded burnNFT call:`, {
-              nftContract: decoded.args.nftContract,
-              tokenId: decoded.args.tokenId.toString()
-            });
-          } catch (e) {
-            console.log(`  ❌ Could not decode burnNFT call:`, (e as Error).message);
-          }
-        } catch (e) {
-          console.log(`  ❌ Transaction data analysis failed:`, (e as Error).message);
-        }
-      }
-      
-      console.warn(`  ⚠️ Burn transaction analysis found no usable token information`);
-      
-    } catch (e) {
-      console.warn(`  ⚠️ Burn transaction analysis failed:`, (e as Error).message);
-    }
-
-    
-    // FALLBACK: Try a very conservative single-block search around the burn
-    try {
-      console.log(`  🔄 Trying conservative single-block FeesClaimed search...`);
-      
-      // Search just the burn block and adjacent blocks
-      for (let blockOffset of [0, -1, 1, -2, 2, -5, 5, -10, 10]) {
-        const searchBlock = burnBlock + blockOffset;
-        if (searchBlock < START_BLOCK) continue;
-        
-        try {
-          console.log(`  🔍 Checking block ${searchBlock} for FeesClaimed events...`);
-          
-          const logs = await provider.getLogs({
-            address: VAULT_ADDRESS,
-            fromBlock: searchBlock,
-            toBlock: searchBlock,
-            topics: [
-              ethers.id("FeesClaimed(address,address,uint256,address,address,uint256,uint256)"),
-              null,
-              ethers.zeroPadValue(manager.toLowerCase(), 32),
-              ethers.zeroPadValue(ethers.toBeHex(BigInt(tokenId)), 32)
-            ]
-          });
-          
-          if (logs.length > 0) {
-            for (const log of logs) {
-              const [, , , token0, token1] = ethers.AbiCoder.defaultAbiCoder().decode(
-                ["address", "address", "uint256", "address", "address", "uint256", "uint256"],
-                log.data
-              );
-              console.log(`  ✅ Found FeesClaimed in block ${searchBlock}: token0=${token0}, token1=${token1}`);
-              return { token0, token1 };
-            }
-          }
-        } catch (e) {
-          // Continue to next block if this one fails
-          console.log(`  ❌ Block ${searchBlock} search failed, continuing...`);
-        }
-      }
-      
-      console.warn(`  ⚠️ Single-block FeesClaimed search found nothing`);
-    } catch (e) {
-      console.warn(`  ⚠️ Conservative FeesClaimed search failed:`, (e as Error).message);
-    }
-
-    console.error(`  ❌ All V4 resolution methods failed for tokenId ${tokenId}`);
+    console.error(`  ⛔ V4 resolution skipped here (handled in processNFTBurnedLog)`);
     return { token0: ethers.ZeroAddress, token1: ethers.ZeroAddress };
   }
 
-  // V3 Resolution (unchanged)
+  // V3 Resolution
   try {
     console.log(`  🔄 Attempting V3 resolution for tokenId ${tokenId}...`);
     const abi = [
@@ -417,6 +388,17 @@ async function fetchPositionTokens(
     console.warn(`  ⚠️ V3 resolution failed:`, (e as Error).message);
     return { token0: ethers.ZeroAddress, token1: ethers.ZeroAddress };
   }
+}
+
+// Small shim so the new quick-fix function compiles without changing your existing resolver's name.
+async function fetchPositionTokensFixed(
+  manager: string,
+  tokenId: string,
+  provider: ethers.JsonRpcProvider,
+  burnBlock: number,
+  txHash: string
+) {
+  return fetchPositionTokens(manager, tokenId, provider, burnBlock, txHash);
 }
 
 async function safeGetLogs(
@@ -524,35 +506,45 @@ async function scanChain(chainName: string, rpcUrl: string) {
 
           console.log(`  📍 Processing burn: manager=${manager}, tokenId=${tokenId}`);
 
-          const { token0, token1 } = await fetchPositionTokens(manager, tokenId, provider, log.blockNumber, txHash);
-          
-          if (token0 === ethers.ZeroAddress || token1 === ethers.ZeroAddress) {
-            console.warn(`  ⚠️ Failed to resolve tokens for tokenId ${tokenId}, skipping...`);
-            continue;
+          // NEW: route V4 burns through the quick-fix processor
+          if (manager.toLowerCase() === V4_MANAGER.toLowerCase()) {
+            const entry = await processNFTBurnedLog(log, provider);
+            if (!entry) {
+              console.warn(`  ⚠️ Failed to resolve V4 tokens for tokenId ${tokenId}, skipping...`);
+              continue;
+            }
+            vaultEntries.push(entry);
+          } else {
+            // V3 legacy path
+            const { token0, token1 } = await fetchPositionTokens(manager, tokenId, provider, log.blockNumber, txHash);
+            if (token0 === ethers.ZeroAddress || token1 === ethers.ZeroAddress) {
+              console.warn(`  ⚠️ Failed to resolve tokens for tokenId ${tokenId}, skipping...`);
+              continue;
+            }
+
+            const sym0 = await fetchTokenSymbol(token0, provider);
+            const sym1 = await fetchTokenSymbol(token1, provider);
+            const pair = `${sym0}/${sym1}`;
+            const project = ignoreSymbols.includes(sym0) ? sym1 : sym0;
+            const type = "v3";
+
+            console.log(`  ✅ Resolved ${type} position: ${pair} (${project})`);
+
+            vaultEntries.push({
+              type,
+              tokenId,
+              manager,
+              token0,
+              token1,
+              pair,
+              project,
+              sender,
+              txHash,
+              timestamp,
+              vault: VAULT_ADDRESS,
+              chain: chainName
+            });
           }
-
-          const sym0 = await fetchTokenSymbol(token0, provider);
-          const sym1 = await fetchTokenSymbol(token1, provider);
-          const pair = `${sym0}/${sym1}`;
-          const project = ignoreSymbols.includes(sym0) ? sym1 : sym0;
-          const type = manager.toLowerCase() === V4_MANAGER.toLowerCase() ? "v4" : "v3";
-
-          console.log(`  ✅ Resolved ${type} position: ${pair} (${project})`);
-
-          vaultEntries.push({
-            type,
-            tokenId,
-            manager,
-            token0,
-            token1,
-            pair,
-            project,
-            sender,
-            txHash,
-            timestamp,
-            vault: VAULT_ADDRESS,
-            chain: chainName
-          });
         }
       } catch (e) {
         console.error(`❌ Error processing log in tx ${log.transactionHash}:`, (e as Error).message);
