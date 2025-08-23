@@ -30,7 +30,8 @@ const ignoreSymbols = ["USDC","USDT","DAI","WETH","ETH","WBTC","BNB","MATIC"];
 // --- chain-specific helpers
 const BASE_WETH = "0x4200000000000000000000000000000000000006";
 const ETH_SENTINELS = new Set([
-  "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+  "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+  ethers.ZeroAddress.toLowerCase()
 ]);
 
 // --- V4 support ---
@@ -54,7 +55,8 @@ const V4_POOLMANAGER_ABI = [
 const POTENTIAL_V4_POOL_MANAGERS = [
   "0x1631559198a9e474033433b2958dabc135ab6446", // Base fallback
   "0x38EB8B22Df3Ae7fb21e92881151B365Df14ba967", // Alternative
-  "0x8C4BcBE6b9eF47855f97E675296FA3F6fafa5F1A"  // Another potential
+  "0x8C4BcBE6b9eF47855f97E675296FA3F6fafa5F1A",  // Another potential
+  "0x498581ff718922c3f8e6a244956af099b2652b2b"  // Added from known deployment
 ];
 
 // ---------- Robust symbol() with fallbacks + cache ----------
@@ -119,13 +121,12 @@ async function fetchTokenSymbol(address: string, provider: ethers.JsonRpcProvide
     return "???";
   }
 
-  // Handle native ETH sentinel & Base WETH
+  // Handle native ETH sentinel & Base WETH & Zero Address
   if (ETH_SENTINELS.has(addr)) return "ETH";
   if (addr === BASE_WETH.toLowerCase()) return "WETH";
 
   if (addr === ethers.ZeroAddress) {
-    console.warn(`⚠️ Zero address provided to fetchTokenSymbol`);
-    return "???";
+    return "ETH"; // Handle native ETH in V4
   }
   
   if (symbolCache.has(addr)) return symbolCache.get(addr)!;
@@ -200,13 +201,41 @@ async function processNFTBurnedLog(log: any, provider: ethers.JsonRpcProvider) {
 
   console.log(`  📍 Processing burn: manager=${manager}, tokenId=${tokenId}`);
 
-  // Try the enhanced resolution first (delegates to existing resolver)
-  let { token0, token1 } = await fetchPositionTokensFixed(manager, tokenId, provider, log.blockNumber, txHash);
-  
-  // FALLBACK: If V4 resolution fails, try getting tokens from the transaction receipt
-  if ((token0 === ethers.ZeroAddress || token1 === ethers.ZeroAddress) && 
-      manager.toLowerCase() === V4_MANAGER.toLowerCase()) {
-    
+  let token0 = ethers.ZeroAddress;
+  let token1 = ethers.ZeroAddress;
+
+  // Step 1: Try resolving V4 tokens via PoolManager
+  if (manager.toLowerCase() === V4_MANAGER.toLowerCase()) {
+    console.log(`  🔄 Attempting V4 resolution via PoolManager for tokenId ${tokenId}...`);
+    try {
+      const positionContract = new ethers.Contract(manager, V4_PM_ABI_B, provider);
+      const position = await positionContract.positions(tokenId);
+      const poolId = position.poolId;
+
+      // Get the PoolManager address dynamically
+      const poolManagerAddr = await getPoolManagerAddr(manager, provider);
+      const poolManager = new ethers.Contract(poolManagerAddr, V4_POOLMANAGER_ABI, provider);
+      
+      const poolInfo = await poolManager.pools(poolId);
+      token0 = (poolInfo.currency0 || poolInfo[0]).toLowerCase();
+      token1 = (poolInfo.currency1 || poolInfo[1]).toLowerCase();
+      
+      if (ethers.isAddress(token0) && ethers.isAddress(token1) && 
+          token0 !== ethers.ZeroAddress && token1 !== ethers.ZeroAddress) {
+        console.log(`  ✅ V4 PoolManager resolved: token0=${token0}, token1=${token1}`);
+      } else {
+        // Handle native ETH if one is zero
+        if (token0 === ethers.ZeroAddress) token0 = "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+        if (token1 === ethers.ZeroAddress) token1 = "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+        console.log(`  ✅ V4 PoolManager resolved with native ETH handling: token0=${token0}, token1=${token1}`);
+      }
+    } catch (e) {
+      console.warn(`  ⚠️ V4 PoolManager resolution failed:`, (e as Error).message);
+    }
+  }
+
+  // Step 2: Fallback to transaction receipt if PoolManager resolution fails
+  if (token0 === ethers.ZeroAddress || token1 === ethers.ZeroAddress) {
     console.log(`  🔄 V4 resolution failed, trying transaction receipt fallback...`);
     
     try {
@@ -216,6 +245,12 @@ async function processNFTBurnedLog(log: any, provider: ethers.JsonRpcProvider) {
       // Get ALL ERC20 transfers in this transaction
       const transferTopic = ethers.id("Transfer(address,address,uint256)");
       
+      // Check for native ETH transfer in the transaction
+      const tx = await provider.getTransaction(txHash);
+      if (tx.value > 0 && (tx.to?.toLowerCase() === VAULT_ADDRESS.toLowerCase() || tx.to?.toLowerCase() === sender.toLowerCase())) {
+        allTokens.add("0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"); // Native ETH
+      }
+
       for (const txLog of receipt.logs) {
         if (txLog.topics[0] === transferTopic && txLog.topics.length === 3) {
           const tokenAddr = txLog.address.toLowerCase();
@@ -240,44 +275,14 @@ async function processNFTBurnedLog(log: any, provider: ethers.JsonRpcProvider) {
         token1 = tokenList[1];
         console.log(`  ✅ Fallback resolved from transaction: ${token0}, ${token1}`);
       } else if (tokenList.length === 1) {
-        // Assume pairing with WETH
+        // Assume pairing with ETH
         token0 = tokenList[0];
-        token1 = BASE_WETH.toLowerCase();
+        token1 = "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
         if (token0 > token1) [token0, token1] = [token1, token0]; // Maintain order
         console.log(`  ✅ Fallback resolved single token: ${token0}, ${token1}`);
       }
     } catch (e) {
       console.warn(`  ⚠️ Transaction receipt fallback failed:`, (e as Error).message);
-    }
-  }
-  
-  // LAST RESORT: Manual token lookup for known V4 positions
-  if ((token0 === ethers.ZeroAddress || token1 === ethers.ZeroAddress) && 
-      manager.toLowerCase() === V4_MANAGER.toLowerCase()) {
-    
-    console.log(`  🔄 Trying manual V4 position lookup...`);
-    
-    // Common Base V4 pairs (update this list as needed)
-    const commonV4Pairs = [
-      ["0x833589fcd6edb6e08f4c7c32d4f71b54bda02913", BASE_WETH], // USDC/WETH
-      ["0x4200000000000000000000000000000000000006", "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"], // WETH/USDC
-      // Add more common pairs here based on your observations
-    ];
-    
-    for (const [t0, t1] of commonV4Pairs) {
-      try {
-        const sym0 = await fetchTokenSymbol(t0, provider);
-        const sym1 = await fetchTokenSymbol(t1, provider);
-        
-        if (sym0 !== "???" && sym1 !== "???") {
-          token0 = t0.toLowerCase();
-          token1 = t1.toLowerCase();
-          console.log(`  💡 Manual lookup found: ${sym0}/${sym1}`);
-          break;
-        }
-      } catch (e) {
-        continue;
-      }
     }
   }
   
