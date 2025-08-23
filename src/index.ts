@@ -218,151 +218,185 @@ async function fetchPositionTokens(
     // SKIP the positions() call entirely - it's not working
     console.log(`  ⚠️ Skipping positions() call due to interface mismatch, going straight to event-based resolution`);
 
-    // Primary strategy: Look for FeesClaimed events (wider search range)
-    try {
-      console.log(`  🔄 Attempting FeesClaimed event search for tokenId ${tokenId}...`);
-      const searchStartBlock = Math.max(START_BLOCK, burnBlock - 2000);
-      const searchEndBlock = Math.min(await provider.getBlockNumber(), burnBlock + 2000);
-      console.log(`  🔍 Searching FeesClaimed from block ${searchStartBlock} to ${searchEndBlock}`);
-      
-      const logs = await safeGetLogs(
-        provider,
-        {
-          address: VAULT_ADDRESS,
-          fromBlock: searchStartBlock,
-          toBlock: searchEndBlock,
-          topics: [
-            ethers.id("FeesClaimed(address,address,uint256,address,address,uint256,uint256)"),
-            null,
-            ethers.zeroPadValue(manager.toLowerCase(), 32),
-            ethers.zeroPadValue(ethers.toBeHex(BigInt(tokenId)), 32)
-          ]
-        },
-        searchStartBlock,
-        searchEndBlock
-      );
-      
-      if (logs.length > 0) {
-        for (const log of logs) {
-          const [, , , token0, token1] = ethers.AbiCoder.defaultAbiCoder().decode(
-            ["address", "address", "uint256", "address", "address", "uint256", "uint256"],
-            log.data
-          );
-          console.log(`  ✅ FeesClaimed event found: token0=${token0}, token1=${token1}`);
-          return { token0, token1 };
-        }
-      }
-      console.warn(`  ⚠️ No FeesClaimed events found for tokenId ${tokenId}`);
-    } catch (e) {
-      console.warn(`  ⚠️ FeesClaimed search failed:`, (e as Error).message);
-    }
+    // PRIMARY STRATEGY: Analyze the burn transaction itself
+    // This is much more efficient and reliable since we already have the txHash
 
-    // Fallback: Look for Transfer events when the position was minted/transferred TO the vault
     try {
-      console.log(`  🔄 Attempting Transfer event analysis for tokenId ${tokenId}...`);
-      const transferTopic = ethers.id("Transfer(address,address,uint256)");
-      const searchStartBlock = Math.max(START_BLOCK, burnBlock - 5000);
-      const searchEndBlock = Math.min(await provider.getBlockNumber(), burnBlock);
-      
-      const transferLogs = await safeGetLogs(
-        provider,
-        {
-          address: manager,
-          fromBlock: searchStartBlock,
-          toBlock: searchEndBlock,
-          topics: [
-            transferTopic,
-            null,
-            ethers.zeroPadValue(VAULT_ADDRESS.toLowerCase(), 32),
-            ethers.zeroPadValue(ethers.toBeHex(BigInt(tokenId)), 32)
-          ]
-        },
-        searchStartBlock,
-        searchEndBlock
-      );
-
-      if (transferLogs.length > 0) {
-        // Get the transaction that transferred this NFT to the vault
-        const transferLog = transferLogs[transferLogs.length - 1]; // Most recent transfer to vault
-        const tx = await provider.getTransaction(transferLog.transactionHash);
-        
-        if (tx) {
-          console.log(`  🔍 Found transfer tx: ${transferLog.transactionHash}, analyzing...`);
-          
-          // Look for IncreaseLiquidity or DecreaseLiquidity events in the same transaction
-          // that might contain the pool information
-          const txReceipt = await provider.getTransactionReceipt(transferLog.transactionHash);
-          
-          if (txReceipt) {
-            // Look for any events that might contain currency/token information
-            for (const log of txReceipt.logs) {
-              try {
-                // Try to decode as potential pool-related events
-                if (log.address.toLowerCase() === manager.toLowerCase() && log.data.length >= 128) {
-                  // Check if this could be a liquidity event with token addresses
-                  const data = log.data;
-                  const potential_token0 = '0x' + data.slice(26, 66);  // Extract potential address
-                  const potential_token1 = '0x' + data.slice(90, 130); // Extract potential address
-                  
-                  if (ethers.isAddress(potential_token0) && ethers.isAddress(potential_token1)) {
-                    console.log(`  💡 Found potential tokens in tx log: token0=${potential_token0}, token1=${potential_token1}`);
-                    // Validate these are real tokens by checking if they have symbols
-                    try {
-                      const sym0 = await fetchTokenSymbol(potential_token0, provider);
-                      const sym1 = await fetchTokenSymbol(potential_token1, provider);
-                      if (sym0 !== "???" && sym1 !== "???") {
-                        console.log(`  ✅ Transaction analysis found valid tokens: ${sym0}/${sym1}`);
-                        return { token0: potential_token0, token1: potential_token1 };
-                      }
-                    } catch {}
-                  }
-                }
-              } catch {}
-            }
-          }
-        }
-      }
-      console.warn(`  ⚠️ Transfer event analysis failed to find tokens`);
-    } catch (e) {
-      console.warn(`  ⚠️ Transfer event analysis failed:`, (e as Error).message);
-    }
-
-    // Last resort: Try to decode the burn transaction itself
-    try {
-      console.log(`  🔄 Analyzing burn transaction ${txHash} for token info...`);
-      const burnTx = await provider.getTransaction(txHash);
+      console.log(`  🔍 Analyzing burn transaction ${txHash} directly...`);
       const burnReceipt = await provider.getTransactionReceipt(txHash);
       
-      if (burnReceipt) {
-        // Look for any ERC20 transfer events in the burn transaction
-        // When a position is burned, it often triggers token transfers
-        const erc20TransferTopic = ethers.id("Transfer(address,address,uint256)");
-        const tokenAddresses = new Set<string>();
-        
-        for (const log of burnReceipt.logs) {
-          if (log.topics[0] === erc20TransferTopic && log.topics.length === 3) {
-            const tokenAddress = log.address.toLowerCase();
-            if (ethers.isAddress(tokenAddress) && tokenAddress !== VAULT_ADDRESS.toLowerCase()) {
-              tokenAddresses.add(tokenAddress);
+      if (!burnReceipt) {
+        throw new Error("Could not fetch burn transaction receipt");
+      }
+
+      console.log(`  📊 Found ${burnReceipt.logs.length} logs in burn transaction`);
+      
+      // Strategy 1: Look for ERC20 Transfer events in the burn transaction
+      const erc20TransferTopic = ethers.id("Transfer(address,address,uint256)");
+      const tokenAddresses = new Set<string>();
+      
+      for (const log of burnReceipt.logs) {
+        if (log.topics[0] === erc20TransferTopic && log.topics.length === 3) {
+          const tokenAddress = log.address.toLowerCase();
+          
+          // Skip the NFT transfer itself and vault address
+          if (ethers.isAddress(tokenAddress) && 
+              tokenAddress !== VAULT_ADDRESS.toLowerCase() && 
+              tokenAddress !== manager.toLowerCase()) {
+            
+            console.log(`  💰 Found ERC20 transfer: ${tokenAddress}`);
+            tokenAddresses.add(tokenAddress);
+          }
+        }
+      }
+      
+      const tokens = Array.from(tokenAddresses);
+      
+      if (tokens.length >= 2) {
+        tokens.sort(); // Ensure consistent ordering
+        console.log(`  ✅ Found ${tokens.length} tokens from ERC20 transfers: ${tokens[0]}, ${tokens[1]}`);
+        return { token0: tokens[0], token1: tokens[1] };
+      }
+      
+      if (tokens.length === 1) {
+        console.log(`  💡 Found single token ${tokens[0]}, assuming paired with WETH`);
+        return { token0: tokens[0], token1: BASE_WETH };
+      }
+      
+      // Strategy 2: Look for any logs from the Position Manager contract
+      console.log(`  🔍 Looking for Position Manager events...`);
+      
+      for (const log of burnReceipt.logs) {
+        if (log.address.toLowerCase() === manager.toLowerCase()) {
+          console.log(`  📋 PM Event - Topics: ${log.topics.length}, Data length: ${log.data.length}`);
+          
+          // Try to extract token addresses from event data
+          if (log.data.length >= 128) {
+            try {
+              // Many V4 events contain currency addresses in their data
+              const dataHex = log.data.slice(2); // Remove 0x prefix
+              const chunks = [];
+              
+              // Split data into 32-byte chunks and look for addresses
+              for (let i = 0; i < dataHex.length; i += 64) {
+                const chunk = dataHex.slice(i, i + 64);
+                if (chunk.length === 64) {
+                  const potentialAddress = '0x' + chunk.slice(24); // Last 20 bytes
+                  if (ethers.isAddress(potentialAddress) && 
+                      potentialAddress !== ethers.ZeroAddress &&
+                      potentialAddress.toLowerCase() !== VAULT_ADDRESS.toLowerCase() &&
+                      potentialAddress.toLowerCase() !== manager.toLowerCase()) {
+                    chunks.push(potentialAddress.toLowerCase());
+                  }
+                }
+              }
+              
+              // Remove duplicates and take first 2 unique addresses
+              const uniqueAddresses = [...new Set(chunks)];
+              
+              if (uniqueAddresses.length >= 2) {
+                console.log(`  💡 Extracted potential tokens from PM event: ${uniqueAddresses[0]}, ${uniqueAddresses[1]}`);
+                
+                // Validate these are real ERC20 tokens
+                try {
+                  const [sym0, sym1] = await Promise.all([
+                    fetchTokenSymbol(uniqueAddresses[0], provider),
+                    fetchTokenSymbol(uniqueAddresses[1], provider)
+                  ]);
+                  
+                  if (sym0 !== "???" && sym1 !== "???") {
+                    console.log(`  ✅ Validated tokens: ${sym0}/${sym1}`);
+                    return { token0: uniqueAddresses[0], token1: uniqueAddresses[1] };
+                  }
+                } catch (e) {
+                  console.log(`  ❌ Token validation failed:`, (e as Error).message);
+                }
+              }
+            } catch (e) {
+              console.log(`  ❌ Failed to parse event data:`, (e as Error).message);
             }
           }
         }
-        
-        const tokens = Array.from(tokenAddresses);
-        if (tokens.length >= 2) {
-          // Sort to ensure consistent ordering
-          tokens.sort();
-          console.log(`  ✅ Burn transaction analysis found tokens: ${tokens[0]}, ${tokens[1]}`);
-          return { token0: tokens[0], token1: tokens[1] };
-        } else if (tokens.length === 1) {
-          // Single token, might be paired with ETH/WETH
-          console.log(`  💡 Found single token ${tokens[0]}, assuming paired with WETH`);
-          return { token0: tokens[0], token1: BASE_WETH };
+      }
+      
+      // Strategy 3: Look at the transaction input data
+      console.log(`  🔍 Analyzing transaction input data...`);
+      const burnTx = await provider.getTransaction(txHash);
+      
+      if (burnTx?.data && burnTx.data.length > 10) {
+        try {
+          // The burnNFT call might contain useful information in its calldata
+          console.log(`  📝 Transaction data length: ${burnTx.data.length}`);
+          
+          // Try to decode the burnNFT call
+          const vaultInterface = new ethers.Interface([
+            "function burnNFT(address nftContract, uint256 tokenId)"
+          ]);
+          
+          try {
+            const decoded = vaultInterface.parseTransaction({ data: burnTx.data, value: burnTx.value });
+            console.log(`  🔓 Decoded burnNFT call:`, {
+              nftContract: decoded.args.nftContract,
+              tokenId: decoded.args.tokenId.toString()
+            });
+          } catch (e) {
+            console.log(`  ❌ Could not decode burnNFT call:`, (e as Error).message);
+          }
+        } catch (e) {
+          console.log(`  ❌ Transaction data analysis failed:`, (e as Error).message);
         }
       }
-      console.warn(`  ⚠️ Burn transaction analysis failed to find sufficient tokens`);
+      
+      console.warn(`  ⚠️ Burn transaction analysis found no usable token information`);
+      
     } catch (e) {
       console.warn(`  ⚠️ Burn transaction analysis failed:`, (e as Error).message);
+    }
+
+    
+    // FALLBACK: Try a very conservative single-block search around the burn
+    try {
+      console.log(`  🔄 Trying conservative single-block FeesClaimed search...`);
+      
+      // Search just the burn block and adjacent blocks
+      for (let blockOffset of [0, -1, 1, -2, 2, -5, 5, -10, 10]) {
+        const searchBlock = burnBlock + blockOffset;
+        if (searchBlock < START_BLOCK) continue;
+        
+        try {
+          console.log(`  🔍 Checking block ${searchBlock} for FeesClaimed events...`);
+          
+          const logs = await provider.getLogs({
+            address: VAULT_ADDRESS,
+            fromBlock: searchBlock,
+            toBlock: searchBlock,
+            topics: [
+              ethers.id("FeesClaimed(address,address,uint256,address,address,uint256,uint256)"),
+              null,
+              ethers.zeroPadValue(manager.toLowerCase(), 32),
+              ethers.zeroPadValue(ethers.toBeHex(BigInt(tokenId)), 32)
+            ]
+          });
+          
+          if (logs.length > 0) {
+            for (const log of logs) {
+              const [, , , token0, token1] = ethers.AbiCoder.defaultAbiCoder().decode(
+                ["address", "address", "uint256", "address", "address", "uint256", "uint256"],
+                log.data
+              );
+              console.log(`  ✅ Found FeesClaimed in block ${searchBlock}: token0=${token0}, token1=${token1}`);
+              return { token0, token1 };
+            }
+          }
+        } catch (e) {
+          // Continue to next block if this one fails
+          console.log(`  ❌ Block ${searchBlock} search failed, continuing...`);
+        }
+      }
+      
+      console.warn(`  ⚠️ Single-block FeesClaimed search found nothing`);
+    } catch (e) {
+      console.warn(`  ⚠️ Conservative FeesClaimed search failed:`, (e as Error).message);
     }
 
     console.error(`  ❌ All V4 resolution methods failed for tokenId ${tokenId}`);
