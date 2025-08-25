@@ -39,8 +39,23 @@ const KNOWN_BASE_TOKENS: Record<string, string> = {
   "0x50c5725949a6f0c72e6c4a641f24049a917db0cb": "DAI",
   "0x2ae3f1ec7f1f5012cfeab0185bfc7aa3cf0dec22": "cbETH",
   "0x940181a94a35a4569e4529a3cdfb74e38fd98631": "AERO",
-  "0x0000000000000000000000000000000000000000": "ETH"
+  "0x0000000000000000000000000000000000000000": "ETH",
+  "0x1ee40af215451b20449114d26853044ac3f4006f": "DOOM",
 };
+
+// ABI for Uniswap V4 Pool to query token0 and token1
+const POOL_ABI = [
+  "function getPool(address tokenA, address tokenB, uint24 fee) view returns (address pool)",
+  "function token0() view returns (address)",
+  "function token1() view returns (address)",
+];
+
+// ABI for LPInferno contract (from provided ABI)
+const LP_INFERNO_ABI = [
+  "function estimateFees(address positionManager, uint256 tokenId) view returns (uint256 amount0, uint256 amount1)",
+  "function burnInfo(address,uint256) view returns (address owner, uint64 burnedAt, uint64 lastClaimedAt, bool claimed)",
+  "event FeesClaimed(address indexed user, address indexed nft, uint256 indexed tokenId, address token0, address token1, uint256 amount0, uint256 amount1)",
+];
 
 // ---------- Robust symbol() with fallbacks + cache ----------
 const SYMBOL_ABI_STRING = ["function symbol() view returns (string)"];
@@ -100,12 +115,10 @@ async function fetchTokenSymbol(address: string, provider: ethers.JsonRpcProvide
     return "???";
   }
 
-  // Handle native ETH sentinel & Base WETH & Zero Address
   if (ETH_SENTINELS.has(addr)) return "ETH";
   if (addr === BASE_WETH.toLowerCase()) return "WETH";
   if (addr === ethers.ZeroAddress.toLowerCase()) return "ETH";
 
-  // Check known tokens first
   if (KNOWN_BASE_TOKENS[addr]) {
     return KNOWN_BASE_TOKENS[addr];
   }
@@ -128,115 +141,128 @@ async function fetchTokenSymbol(address: string, provider: ethers.JsonRpcProvide
   return sym;
 }
 
-// Enhanced transaction analysis specifically for V4 burns
+// Retry wrapper for contract calls
+async function withRetry<T>(fn: () => Promise<T>, retries = MAX_RETRIES, delay = RETRY_DELAY): Promise<T> {
+  for (let i = 0; i < retries; i++) {
+    try {
+      return await fn();
+    } catch (e) {
+      if (i === retries - 1) throw e;
+      console.log(`Retrying (${i + 1}/${retries})...`);
+      await new Promise((resolve) => setTimeout(resolve, delay));
+    }
+  }
+  throw new Error("Retry limit reached");
+}
+
+// Enhanced transaction analysis for V4 burns
 async function analyzeV4BurnTransaction(
   txHash: string,
   tokenId: string,
-  provider: ethers.JsonRpcProvider
+  provider: ethers.JsonRpcProvider,
+  blockNumber: number
 ): Promise<{ token0: string; token1: string }> {
   console.log(`🔍 Deep transaction analysis for V4 tokenId ${tokenId} in tx ${txHash}`);
 
   try {
     const [receipt, tx] = await Promise.all([
       provider.getTransactionReceipt(txHash),
-      provider.getTransaction(txHash)
+      provider.getTransaction(txHash),
     ]);
 
     const detectedTokens = new Set<string>();
     const transferTopic = ethers.id("Transfer(address,address,uint256)");
     const decreaseLiquidityTopic = ethers.id("DecreaseLiquidity(uint256,uint128,uint256,uint256)");
     const collectTopic = ethers.id("Collect(uint256,address,uint256,uint256)");
+    const poolInitializedTopic = ethers.id("Initialize(address,address,address,uint24,int24)");
 
     // Strategy 1: Check for native ETH value
     if (tx.value && tx.value > 0n) {
-      detectedTokens.add(ethers.ZeroAddress);
+      detectedTokens.add("0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee");
       console.log(`  ✅ Native ETH detected: ${ethers.formatEther(tx.value)}`);
     }
 
-    // Strategy 2: Analyze all Transfer events involving meaningful amounts
-    const transferLogs = receipt.logs.filter(log => 
-      log.topics[0] === transferTopic && 
-      log.topics.length === 3 &&
-      log.data !== "0x" // Has amount data
+    // Strategy 2: Analyze all Transfer events
+    const transferLogs = receipt.logs.filter(
+      (log) => log.topics[0] === transferTopic && log.topics.length === 3 && log.data !== "0x"
     );
 
     for (const log of transferLogs) {
       const tokenAddr = log.address.toLowerCase();
-      const from = "0x" + log.topics[1].slice(26).toLowerCase();
-      const to = "0x" + log.topics[2].slice(26).toLowerCase();
-      
-      // Parse amount to filter out dust/spam tokens
       let amount = 0n;
       try {
         amount = ethers.toBigInt(log.data);
       } catch {}
 
-      // Include tokens with meaningful transfers (> 0 and reasonable size)
       if (
         amount > 0n &&
-        amount < ethers.parseEther("1000000000") && // Reasonable upper bound
-        tokenAddr !== VAULT_ADDRESS.toLowerCase() &&
-        tokenAddr !== V4_MANAGER.toLowerCase() &&
+        amount < ethers.parseEther("1000000000") &&
         ethers.isAddress(tokenAddr) &&
-        // Must involve the vault or user in some way
-        (from === VAULT_ADDRESS.toLowerCase() || 
-         to === VAULT_ADDRESS.toLowerCase() ||
-         // Or be part of the position closure/burn process
-         from === V4_MANAGER.toLowerCase() ||
-         to === V4_MANAGER.toLowerCase())
+        tokenAddr !== VAULT_ADDRESS.toLowerCase() &&
+        tokenAddr !== V4_MANAGER.toLowerCase()
       ) {
         detectedTokens.add(tokenAddr);
-        console.log(`  ✅ Token transfer detected: ${tokenAddr} amount: ${amount.toString()}`);
+        console.log(`  ✅ Token transfer detected: ${tokenAddr}, amount: ${ethers.formatUnits(amount, 18)}`);
       }
     }
 
-    // Strategy 3: Look for DecreaseLiquidity events (position closure)
-    const decreaseLogs = receipt.logs.filter(log => log.topics[0] === decreaseLiquidityTopic);
-    if (decreaseLogs.length > 0) {
-      console.log(`  ✅ Found DecreaseLiquidity events: ${decreaseLogs.length}`);
-      
-      // Try to find associated token transfers right after decrease
-      for (const decreaseLog of decreaseLogs) {
-        const logIndex = receipt.logs.indexOf(decreaseLog);
-        const nextLogs = receipt.logs.slice(logIndex + 1, logIndex + 10); // Check next few logs
-        
-        for (const nextLog of nextLogs) {
-          if (nextLog.topics[0] === transferTopic && nextLog.topics.length === 3) {
-            const tokenAddr = nextLog.address.toLowerCase();
-            if (ethers.isAddress(tokenAddr) && 
-                tokenAddr !== VAULT_ADDRESS.toLowerCase() &&
-                tokenAddr !== V4_MANAGER.toLowerCase()) {
-              detectedTokens.add(tokenAddr);
-              console.log(`  ✅ Post-decrease token: ${tokenAddr}`);
-            }
+    // Strategy 3: Look for DecreaseLiquidity and Collect events to find pool
+    const poolAddresses = new Set<string>();
+    const decreaseLogs = receipt.logs.filter((log) => log.topics[0] === decreaseLiquidityTopic);
+    const collectLogs = receipt.logs.filter((log) => log.topics[0] === collectTopic);
+
+    for (const log of [...decreaseLogs, ...collectLogs]) {
+      const logIndex = receipt.logs.indexOf(log);
+      const nextLogs = receipt.logs.slice(logIndex + 1, logIndex + 10);
+      for (const nextLog of nextLogs) {
+        if (nextLog.topics[0] === transferTopic && nextLog.topics.length === 3) {
+          const tokenAddr = nextLog.address.toLowerCase();
+          if (
+            ethers.isAddress(tokenAddr) &&
+            tokenAddr !== VAULT_ADDRESS.toLowerCase() &&
+            tokenAddr !== V4_MANAGER.toLowerCase()
+          ) {
+            detectedTokens.add(tokenAddr);
+            console.log(`  ✅ Post-event token: ${tokenAddr}`);
           }
         }
       }
+      // Assume the log.address is the pool
+      if (ethers.isAddress(log.address) && log.address !== VAULT_ADDRESS && log.address !== V4_MANAGER) {
+        poolAddresses.add(log.address.toLowerCase());
+        console.log(`  ✅ Potential pool address: ${log.address}`);
+      }
     }
 
-    // Strategy 4: Check input data for encoded token addresses
+    // Strategy 4: Check input data for pool or token addresses
     if (tx.data && tx.data.length > 10) {
-      const inputData = tx.data;
       console.log(`  🔍 Analyzing transaction input data...`);
-      
-      // Look for 20-byte patterns that might be addresses
-      for (let i = 0; i < inputData.length - 40; i += 2) {
-        const potential = inputData.slice(i, i + 42);
-        if (potential.length === 42 && potential.startsWith('0x')) {
+      const selectors = [
+        ethers.id("burn(uint256)"), // PositionManager burn
+        ethers.id("decreaseLiquidity((uint256,uint128,uint256,uint256))"), // DecreaseLiquidity
+        ethers.id("collect((uint256,address,uint128,uint128))"), // Collect
+      ];
+      for (let i = 10; i < tx.data.length - 40; i += 2) {
+        const potential = tx.data.slice(i, i + 42);
+        if (potential.length === 42 && potential.startsWith("0x")) {
           try {
             if (ethers.isAddress(potential)) {
               const addr = potential.toLowerCase();
-              // Check if this looks like a token (has symbol/name functions)
               try {
                 const testContract = new ethers.Contract(addr, SYMBOL_ABI_STRING, provider);
-                await testContract.symbol();
-                if (addr !== VAULT_ADDRESS.toLowerCase() && 
-                    addr !== V4_MANAGER.toLowerCase()) {
+                await testContract.symbol({ blockTag: blockNumber });
+                if (addr !== VAULT_ADDRESS.toLowerCase() && addr !== V4_MANAGER.toLowerCase()) {
                   detectedTokens.add(addr);
                   console.log(`  ✅ Input data token: ${addr}`);
                 }
               } catch {
-                // Not a token, continue
+                // Check if it's a pool
+                try {
+                  const poolContract = new ethers.Contract(addr, POOL_ABI, provider);
+                  await poolContract.token0({ blockTag: blockNumber });
+                  poolAddresses.add(addr);
+                  console.log(`  ✅ Input data pool: ${addr}`);
+                } catch {}
               }
             }
           } catch {}
@@ -244,37 +270,83 @@ async function analyzeV4BurnTransaction(
       }
     }
 
-    // Convert to sorted array
+    // Strategy 5: Query pool addresses for token0 and token1
+    for (const poolAddr of poolAddresses) {
+      try {
+        const poolContract = new ethers.Contract(poolAddr, POOL_ABI, provider);
+        const [token0, token1] = await Promise.all([
+          poolContract.token0({ blockTag: blockNumber }),
+          poolContract.token1({ blockTag: blockNumber }),
+        ]);
+        if (ethers.isAddress(token0) && ethers.isAddress(token1)) {
+          detectedTokens.add(token0.toLowerCase());
+          detectedTokens.add(token1.toLowerCase());
+          console.log(`  ✅ Pool ${poolAddr} resolved: token0=${token0}, token1=${token1}`);
+        }
+      } catch (e) {
+        console.warn(`  ⚠️ Failed to query pool ${poolAddr}:`, (e as Error).message);
+      }
+    }
+
+    // Strategy 6: Fallback to FeesClaimed events
+    try {
+      const feesClaimedTopic = ethers.id(
+        "FeesClaimed(address,address,uint256,address,address,uint256,uint256)"
+      );
+      const logs = await withRetry(() =>
+        provider.getLogs({
+          address: VAULT_ADDRESS,
+          topics: [
+            feesClaimedTopic,
+            null,
+            ethers.zeroPadValue(ethers.getAddress(V4_MANAGER), 32),
+            ethers.zeroPadValue(ethers.toBigInt(tokenId), 32),
+          ],
+          fromBlock: START_BLOCK,
+          toBlock: blockNumber,
+        })
+      );
+      if (logs.length > 0) {
+        const latestLog = logs[logs.length - 1];
+        const decoded = ethers.AbiCoder.defaultAbiCoder().decode(
+          ["address", "address", "uint256", "address", "address", "uint256", "uint256"],
+          latestLog.data
+        );
+        detectedTokens.add(decoded[3].toLowerCase());
+        detectedTokens.add(decoded[4].toLowerCase());
+        console.log(`  ✅ FeesClaimed resolved: token0=${decoded[3]}, token1=${decoded[4]}`);
+      }
+    } catch (e) {
+      console.warn(`  ⚠️ FeesClaimed resolution failed:`, (e as Error).message);
+    }
+
     const tokenList = Array.from(detectedTokens).sort();
-    
-    // Return the best pair we can find
+
     if (tokenList.length >= 2) {
       console.log(`  ✅ Multi-token resolution: ${tokenList[0]}, ${tokenList[1]}`);
       return { token0: tokenList[0], token1: tokenList[1] };
     } else if (tokenList.length === 1) {
-      // Pair with WETH as fallback
       const token = tokenList[0];
-      const weth = BASE_WETH.toLowerCase();
-      const sorted = token < weth ? { token0: token, token1: weth } : { token0: weth, token1: token };
-      console.log(`  ✅ Single token + WETH: ${sorted.token0}, ${sorted.token1}`);
+      const eth = "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+      const sorted = token < eth ? { token0: token, token1: eth } : { token0: eth, token1: token };
+      console.log(`  ✅ Single token + ETH: ${sorted.token0}, ${sorted.token1}`);
       return sorted;
     }
 
-    // Final fallback - if we found ETH transfers, assume ETH/WETH pair
     if (tx.value && tx.value > 0n) {
       console.log(`  ✅ Fallback to ETH/WETH pair`);
-      return { 
-        token0: ethers.ZeroAddress, 
-        token1: BASE_WETH.toLowerCase()
+      return {
+        token0: "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        token1: BASE_WETH.toLowerCase(),
       };
     }
 
+    console.log(`  ⚠️ Could not determine tokens from transaction analysis`);
+    return { token0: ethers.ZeroAddress, token1: ethers.ZeroAddress };
   } catch (error) {
     console.error(`  ❌ Transaction analysis failed:`, (error as Error).message);
+    return { token0: ethers.ZeroAddress, token1: ethers.ZeroAddress };
   }
-
-  console.log(`  ⚠️ Could not determine tokens from transaction analysis`);
-  return { token0: ethers.ZeroAddress, token1: ethers.ZeroAddress };
 }
 
 async function processNFTBurnedLog(log: any, provider: ethers.JsonRpcProvider) {
@@ -289,23 +361,39 @@ async function processNFTBurnedLog(log: any, provider: ethers.JsonRpcProvider) {
 
   console.log(`  📍 Processing burn: manager=${manager}, tokenId=${tokenId}`);
 
+  // Validate ownership
+  try {
+    const erc721Abi = ["function ownerOf(uint256) view returns (address)"];
+    const contract = new ethers.Contract(manager, erc721Abi, provider);
+    const owner: string = await withRetry(() =>
+      contract.ownerOf(tokenId, { blockTag: log.blockNumber })
+    );
+    console.log(`  ℹ️ tokenId ${tokenId} owned by ${owner}`);
+    if (owner.toLowerCase() !== VAULT_ADDRESS.toLowerCase()) {
+      console.warn(`  ⚠️ tokenId ${tokenId} not owned by vault ${VAULT_ADDRESS}, owner: ${owner}`);
+      return null;
+    }
+  } catch (e) {
+    console.warn(`  ⚠️ ownerOf check failed for tokenId ${tokenId}:`, (e as Error).message);
+    return null;
+  }
+
   let token0 = ethers.ZeroAddress;
   let token1 = ethers.ZeroAddress;
 
   if (manager.toLowerCase() === V4_MANAGER.toLowerCase()) {
     console.log(`  🔄 V4 position detected, using transaction analysis...`);
-    const result = await analyzeV4BurnTransaction(txHash, tokenId, provider);
+    const result = await analyzeV4BurnTransaction(txHash, tokenId, provider, log.blockNumber);
     token0 = result.token0;
     token1 = result.token1;
   } else {
-    // V3 Resolution (existing logic)
     console.log(`  🔄 V3 position detected, using standard resolution...`);
     try {
       const abi = [
         "function positions(uint256) view returns (uint96,address,address,address,uint24,int24,int24,uint128,uint256,uint256,uint128,uint128)",
       ];
       const contract = new ethers.Contract(manager, abi, provider);
-      const pos = await contract.positions(tokenId);
+      const pos = await withRetry(() => contract.positions(tokenId, { blockTag: log.blockNumber }));
       token0 = pos[2].toLowerCase();
       token1 = pos[3].toLowerCase();
       console.log(`  ✅ V3 resolved: token0=${token0}, token1=${token1}`);
@@ -314,13 +402,11 @@ async function processNFTBurnedLog(log: any, provider: ethers.JsonRpcProvider) {
     }
   }
 
-  // Validate tokens
   if (token0 === ethers.ZeroAddress || token1 === ethers.ZeroAddress) {
     console.warn(`  ⚠️ Token resolution failed for tokenId ${tokenId}, skipping...`);
     return null;
   }
 
-  // Handle native ETH representation
   if (token0 === ethers.ZeroAddress) token0 = "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
   if (token1 === ethers.ZeroAddress) token1 = "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
 
@@ -441,7 +527,6 @@ async function scanChain(chainName: string, rpcUrl: string) {
           });
         } else if (log.topics[0] === NFTBurnedTopic) {
           console.log(`🔥 Processing NFTBurned event in tx ${txHash}`);
-          
           const entry = await processNFTBurnedLog(log, provider);
           if (entry) {
             vaultEntries.push(entry);
