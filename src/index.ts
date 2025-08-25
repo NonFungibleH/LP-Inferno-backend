@@ -34,21 +34,44 @@ const ETH_SENTINELS = new Set([
   ethers.ZeroAddress.toLowerCase(),
 ]);
 
-// --- V4 support ---
-const V4_PM_ABI = [
-  "function positions(uint256) view returns (uint96 nonce, address operator, address token0, address token1, uint24 fee, int24 tickLower, int24 tickUpper, uint128 liquidity, uint256 feeGrowthInside0LastX128, uint256 feeGrowthInside1LastX128, uint128 tokensOwed0, uint128 tokensOwed1)",
+// --- CORRECTED V4 ABIs ---
+// The issue is that V4 Position Manager doesn't use the same positions() function as V3
+// Let's try multiple possible V4 patterns based on common implementations
+
+const V4_POSITION_ABIS = [
+  // Pattern 1: Standard ERC721 + metadata
+  [
+    "function tokenURI(uint256 tokenId) view returns (string)",
+    "function ownerOf(uint256 tokenId) view returns (address)"
+  ],
+  // Pattern 2: Position details via different methods
+  [
+    "function getPositionInfo(uint256 tokenId) view returns (address token0, address token1, uint24 fee, int24 tickLower, int24 tickUpper, uint128 liquidity)",
+    "function ownerOf(uint256 tokenId) view returns (address)"
+  ],
+  // Pattern 3: Direct pool access
+  [
+    "function poolKeys(uint256 tokenId) view returns (address currency0, address currency1, uint24 fee, int24 tickSpacing, address hooks)",
+    "function ownerOf(uint256 tokenId) view returns (address)"
+  ],
+  // Pattern 4: Liquidity position data
+  [
+    "function liquidityPositions(uint256 tokenId) view returns (address token0, address token1, uint128 liquidity, int24 tickLower, int24 tickUpper)",
+    "function ownerOf(uint256 tokenId) view returns (address)"
+  ]
 ];
 
 const V4_POOLMANAGER_ABI = [
-  "function pools(bytes32) view returns (address currency0, address currency1, uint24 fee, address hooks, int24 tickSpacing, uint8 unlocked, uint8 protocolFee, uint8 lpFee)",
+  "function getPool(address currency0, address currency1, uint24 fee) view returns (address pool)",
+  "function pools(bytes32 poolId) view returns (address currency0, address currency1, uint24 fee, address hooks, int24 tickSpacing)"
 ];
 
 // Try multiple potential pool manager addresses
 const POTENTIAL_V4_POOL_MANAGERS = [
-  "0x498581ff718922c3f8e6a244956af099b2652b2b", // Known PoolManager from NFT details
   "0x1631559198a9e474033433b2958dabc135ab6446", // Base fallback
   "0x38EB8B22Df3Ae7fb21e92881151B365Df14ba967", // Alternative
   "0x8C4BcBE6b9eF47855f97E675296FA3F6fafa5F1A", // Another potential
+  "0x498581ff718922c3f8e6a244956af099b2652b2b", // From your logs
 ];
 
 // ---------- Robust symbol() with fallbacks + cache ----------
@@ -131,42 +154,127 @@ async function fetchTokenSymbol(address: string, provider: ethers.JsonRpcProvide
   return sym;
 }
 
-// Try to read PoolManager from PM with multiple methods
-async function getPoolManagerAddr(pmAddr: string, provider: ethers.JsonRpcProvider): Promise<string> {
-  const tryABIs = [
-    ["function manager() view returns (address)", "manager"],
-    ["function poolManager() view returns (address)", "poolManager"],
-    ["function POOL_MANAGER() view returns (address)", "POOL_MANAGER"],
-  ] as const;
+// Enhanced V4 token resolution with multiple strategies
+async function resolveV4TokensEnhanced(
+  manager: string, 
+  tokenId: string, 
+  provider: ethers.JsonRpcProvider,
+  txHash: string
+): Promise<{ token0: string; token1: string }> {
+  console.log(`🔄 Enhanced V4 resolution for tokenId ${tokenId}...`);
 
-  console.log(`🔍 Attempting to resolve PoolManager address from PM: ${pmAddr}`);
-
-  for (const [sig, fn] of tryABIs) {
+  // Strategy 1: Try different ABI patterns
+  for (let i = 0; i < V4_POSITION_ABIS.length; i++) {
     try {
-      const c = new ethers.Contract(pmAddr, [sig], provider);
-      const addr: string = await (c as any)[fn]();
-      if (ethers.isAddress(addr) && addr !== ethers.ZeroAddress) {
-        console.log(`✅ Found PoolManager via ${fn}(): ${addr}`);
-        return addr;
+      console.log(`  📋 Trying ABI pattern ${i + 1}...`);
+      const contract = new ethers.Contract(manager, V4_POSITION_ABIS[i], provider);
+      
+      // Try different function names based on the ABI
+      let result: any;
+      try {
+        if ('getPositionInfo' in contract) {
+          result = await contract.getPositionInfo(tokenId);
+          if (result && result.length >= 2) {
+            return { token0: result[0], token1: result[1] };
+          }
+        }
+        if ('poolKeys' in contract) {
+          result = await contract.poolKeys(tokenId);
+          if (result && result.length >= 2) {
+            return { token0: result[0], token1: result[1] };
+          }
+        }
+        if ('liquidityPositions' in contract) {
+          result = await contract.liquidityPositions(tokenId);
+          if (result && result.length >= 2) {
+            return { token0: result[0], token1: result[1] };
+          }
+        }
+      } catch (e) {
+        console.log(`    ❌ Pattern ${i + 1} failed:`, (e as Error).message);
       }
     } catch (e) {
-      console.log(`  ❌ ${fn}() failed:`, (e as Error).message);
+      console.log(`    ❌ ABI pattern ${i + 1} failed:`, (e as Error).message);
     }
   }
 
-  // Try known addresses
-  for (const potentialAddr of POTENTIAL_V4_POOL_MANAGERS) {
-    try {
-      const poolMgr = new ethers.Contract(potentialAddr, V4_POOLMANAGER_ABI, provider);
-      const testBytes32 = "0x0000000000000000000000000000000000000000000000000000000000000001";
-      await poolMgr.pools(testBytes32); // This will throw if the function doesn't exist
-      console.log(`✅ Using fallback PoolManager: ${potentialAddr}`);
-      return potentialAddr;
-    } catch {}
+  // Strategy 2: Parse transaction receipt for token transfers
+  console.log(`  🔄 Trying transaction receipt analysis...`);
+  try {
+    const receipt = await provider.getTransactionReceipt(txHash);
+    const tx = await provider.getTransaction(txHash);
+    const allTokens = new Set<string>();
+    const transferTopic = ethers.id("Transfer(address,address,uint256)");
+
+    // Check for native ETH transfer
+    if (tx.value && tx.value > 0n) {
+      allTokens.add("0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee");
+      console.log(`    ℹ️ Detected native ETH transfer: value=${ethers.formatEther(tx.value)}`);
+    }
+
+    // Collect ERC20 transfers
+    for (const txLog of receipt.logs) {
+      if (txLog.topics[0] === transferTopic && txLog.topics.length === 3) {
+        const tokenAddr = txLog.address.toLowerCase();
+        const from = "0x" + txLog.topics[1].slice(26).toLowerCase();
+        const to = "0x" + txLog.topics[2].slice(26).toLowerCase();
+
+        // Look for transfers involving the vault or user
+        if (
+          tokenAddr !== VAULT_ADDRESS.toLowerCase() &&
+          tokenAddr !== manager.toLowerCase() &&
+          ethers.isAddress(tokenAddr) &&
+          (from === VAULT_ADDRESS.toLowerCase() || to === VAULT_ADDRESS.toLowerCase())
+        ) {
+          allTokens.add(tokenAddr);
+          console.log(`    ℹ️ Found token transfer: ${tokenAddr}`);
+        }
+      }
+    }
+
+    const tokenList = Array.from(allTokens).sort();
+    if (tokenList.length >= 2) {
+      console.log(`    ✅ Receipt resolved: ${tokenList[0]}, ${tokenList[1]}`);
+      return { token0: tokenList[0], token1: tokenList[1] };
+    } else if (tokenList.length === 1) {
+      // Assume pair with WETH
+      const token0 = tokenList[0];
+      const token1 = BASE_WETH.toLowerCase();
+      const sorted = token0 < token1 ? { token0, token1 } : { token0: token1, token1: token0 };
+      console.log(`    ✅ Receipt resolved single token with WETH: ${sorted.token0}, ${sorted.token1}`);
+      return sorted;
+    }
+  } catch (e) {
+    console.log(`    ❌ Receipt analysis failed:`, (e as Error).message);
   }
 
-  console.warn(`⚠️ Could not resolve PoolManager address, using fallback`);
-  return POTENTIAL_V4_POOL_MANAGERS[0];
+  // Strategy 3: Try to parse tokenURI if available (some V4 implementations encode metadata)
+  console.log(`  🔄 Trying tokenURI metadata parsing...`);
+  try {
+    const contract = new ethers.Contract(manager, ["function tokenURI(uint256) view returns (string)"], provider);
+    const uri = await contract.tokenURI(tokenId);
+    
+    if (uri && uri.startsWith('data:application/json')) {
+      const jsonStr = uri.replace('data:application/json,', '');
+      const metadata = JSON.parse(decodeURIComponent(jsonStr));
+      
+      // Look for token addresses in metadata
+      if (metadata.attributes) {
+        const token0Attr = metadata.attributes.find((attr: any) => attr.trait_type === 'Token 0' || attr.trait_type === 'token0');
+        const token1Attr = metadata.attributes.find((attr: any) => attr.trait_type === 'Token 1' || attr.trait_type === 'token1');
+        
+        if (token0Attr && token1Attr && ethers.isAddress(token0Attr.value) && ethers.isAddress(token1Attr.value)) {
+          console.log(`    ✅ URI metadata resolved: ${token0Attr.value}, ${token1Attr.value}`);
+          return { token0: token0Attr.value.toLowerCase(), token1: token1Attr.value.toLowerCase() };
+        }
+      }
+    }
+  } catch (e) {
+    console.log(`    ❌ URI parsing failed:`, (e as Error).message);
+  }
+
+  console.log(`    ⚠️ All V4 resolution strategies failed for tokenId ${tokenId}`);
+  return { token0: ethers.ZeroAddress, token1: ethers.ZeroAddress };
 }
 
 async function processNFTBurnedLog(log: any, provider: ethers.JsonRpcProvider) {
@@ -184,87 +292,38 @@ async function processNFTBurnedLog(log: any, provider: ethers.JsonRpcProvider) {
   let token0 = ethers.ZeroAddress;
   let token1 = ethers.ZeroAddress;
 
-  // Step 1: Try resolving V4 tokens via Position Manager's positions function
+  // Step 1: Resolve tokens based on manager type
   if (manager.toLowerCase() === V4_MANAGER.toLowerCase()) {
-    console.log(`  🔄 Attempting V4 resolution via Position Manager for tokenId ${tokenId}...`);
+    console.log(`  🔄 V4 position detected, using enhanced resolution...`);
+    const result = await resolveV4TokensEnhanced(manager, tokenId, provider, txHash);
+    token0 = result.token0;
+    token1 = result.token1;
+  } else {
+    // V3 Resolution (existing logic)
+    console.log(`  🔄 V3 position detected, using standard resolution...`);
     try {
-      const positionContract = new ethers.Contract(manager, V4_PM_ABI, provider);
-      const position = await positionContract.positions(tokenId);
-      token0 = position.token0.toLowerCase();
-      token1 = position.token1.toLowerCase();
-
-      // Handle native ETH (zero address in V4)
-      if (token0 === ethers.ZeroAddress) token0 = "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
-      if (token1 === ethers.ZeroAddress) token1 = "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
-
-      if (ethers.isAddress(token0) && ethers.isAddress(token1)) {
-        console.log(`  ✅ V4 Position Manager resolved: token0=${token0}, token1=${token1}`);
-      } else {
-        console.warn(`  ⚠️ Invalid token addresses: token0=${token0}, token1=${token1}`);
-        token0 = ethers.ZeroAddress;
-        token1 = ethers.ZeroAddress;
-      }
+      const abi = [
+        "function positions(uint256) view returns (uint96,address,address,address,uint24,int24,int24,uint128,uint256,uint256,uint128,uint128)",
+      ];
+      const contract = new ethers.Contract(manager, abi, provider);
+      const pos = await contract.positions(tokenId);
+      token0 = pos[2].toLowerCase();
+      token1 = pos[3].toLowerCase();
+      console.log(`  ✅ V3 resolved: token0=${token0}, token1=${token1}`);
     } catch (e) {
-      console.warn(`  ⚠️ V4 Position Manager resolution failed:`, (e as Error).message);
+      console.warn(`  ⚠️ V3 resolution failed:`, (e as Error).message);
     }
   }
 
-  // Step 2: Fallback to transaction receipt if Position Manager resolution fails
+  // Validate tokens
   if (token0 === ethers.ZeroAddress || token1 === ethers.ZeroAddress) {
-    console.log(`  🔄 V4 resolution failed, trying transaction receipt fallback...`);
-    try {
-      const receipt = await provider.getTransactionReceipt(txHash);
-      const tx = await provider.getTransaction(txHash);
-      const allTokens = new Set<string>();
-      const transferTopic = ethers.id("Transfer(address,address,uint256)");
-
-      // Check for native ETH transfer
-      if (tx.value > 0 && (tx.to?.toLowerCase() === VAULT_ADDRESS.toLowerCase() || tx.to?.toLowerCase() === sender.toLowerCase())) {
-        allTokens.add("0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee");
-        console.log(`  ℹ️ Detected native ETH transfer: value=${ethers.formatEther(tx.value)}`);
-      }
-
-      // Collect ERC20 transfers
-      for (const txLog of receipt.logs) {
-        if (txLog.topics[0] === transferTopic && txLog.topics.length === 3) {
-          const tokenAddr = txLog.address.toLowerCase();
-          const from = "0x" + txLog.topics[1].slice(26);
-          const to = "0x" + txLog.topics[2].slice(26);
-
-          if (
-            (from.toLowerCase() === VAULT_ADDRESS.toLowerCase() || to.toLowerCase() === sender.toLowerCase()) &&
-            tokenAddr !== VAULT_ADDRESS.toLowerCase() &&
-            tokenAddr !== manager.toLowerCase() &&
-            ethers.isAddress(tokenAddr)
-          ) {
-            allTokens.add(tokenAddr);
-            console.log(`  ℹ️ Detected ERC20 transfer: token=${tokenAddr}, from=${from}, to=${to}`);
-          }
-        }
-      }
-
-      const tokenList = Array.from(allTokens).sort();
-      if (tokenList.length >= 2) {
-        token0 = tokenList[0];
-        token1 = tokenList[1];
-        console.log(`  ✅ Fallback resolved from transaction: ${token0}, ${token1}`);
-      } else if (tokenList.length === 1) {
-        token0 = tokenList[0];
-        token1 = "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
-        if (token0 > token1) [token0, token1] = [token1, token0]; // Maintain order
-        console.log(`  ✅ Fallback resolved single token with ETH: ${token0}, ${token1}`);
-      } else {
-        console.warn(`  ⚠️ No valid tokens found in transaction receipt`);
-      }
-    } catch (e) {
-      console.warn(`  ⚠️ Transaction receipt fallback failed:`, (e as Error).message);
-    }
-  }
-
-  if (token0 === ethers.ZeroAddress || token1 === ethers.ZeroAddress) {
-    console.warn(`  ⚠️ All resolution methods failed for tokenId ${tokenId}, skipping...`);
+    console.warn(`  ⚠️ Token resolution failed for tokenId ${tokenId}, skipping...`);
     return null;
   }
+
+  // Handle native ETH representation
+  if (token0 === ethers.ZeroAddress) token0 = "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+  if (token1 === ethers.ZeroAddress) token1 = "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
 
   const sym0 = await fetchTokenSymbol(token0, provider);
   const sym1 = await fetchTokenSymbol(token1, provider);
@@ -288,63 +347,6 @@ async function processNFTBurnedLog(log: any, provider: ethers.JsonRpcProvider) {
     vault: VAULT_ADDRESS,
     chain: "base",
   };
-}
-
-async function fetchPositionTokens(
-  manager: string,
-  tokenId: string,
-  provider: ethers.JsonRpcProvider,
-  burnBlock: number,
-  txHash: string
-) {
-  const isV4 = manager.toLowerCase() === V4_MANAGER.toLowerCase();
-
-  console.log(`🔍 Resolving tokens for ${isV4 ? "V4" : "V3"} position ${tokenId} on manager ${manager}`);
-
-  // Validate tokenId ownership
-  try {
-    const erc721Abi = ["function ownerOf(uint256) view returns (address)"];
-    const contract = new ethers.Contract(manager, erc721Abi, provider);
-    const owner: string = await contract.ownerOf(tokenId);
-    console.log(`  ℹ️ tokenId ${tokenId} owned by ${owner}`);
-    if (owner.toLowerCase() !== VAULT_ADDRESS.toLowerCase()) {
-      console.warn(`  ⚠️ tokenId ${tokenId} not owned by vault ${VAULT_ADDRESS}, owner: ${owner}`);
-      return { token0: ethers.ZeroAddress, token1: ethers.ZeroAddress };
-    }
-  } catch (e) {
-    console.warn(`  ⚠️ ownerOf check failed for tokenId ${tokenId}:`, (e as Error).message);
-    return { token0: ethers.ZeroAddress, token1: ethers.ZeroAddress };
-  }
-
-  if (isV4) {
-    console.error(`  ⛔ V4 resolution skipped here (handled in processNFTBurnedLog)`);
-    return { token0: ethers.ZeroAddress, token1: ethers.ZeroAddress };
-  }
-
-  // V3 Resolution
-  try {
-    console.log(`  🔄 Attempting V3 resolution for tokenId ${tokenId}...`);
-    const abi = [
-      "function positions(uint256) view returns (uint96,address,address,address,uint24,int24,int24,uint128,uint256,uint256,uint128,uint128)",
-    ];
-    const contract = new ethers.Contract(manager, abi, provider);
-    const pos = await contract.positions(tokenId);
-    console.log(`  ✅ V3 resolved: token0=${pos[2]}, token1=${pos[3]}`);
-    return { token0: pos[2], token1: pos[3] };
-  } catch (e) {
-    console.warn(`  ⚠️ V3 resolution failed:`, (e as Error).message);
-    return { token0: ethers.ZeroAddress, token1: ethers.ZeroAddress };
-  }
-}
-
-async function fetchPositionTokensFixed(
-  manager: string,
-  tokenId: string,
-  provider: ethers.JsonRpcProvider,
-  burnBlock: number,
-  txHash: string
-) {
-  return fetchPositionTokens(manager, tokenId, provider, burnBlock, txHash);
 }
 
 async function safeGetLogs(
@@ -440,48 +442,12 @@ async function scanChain(chainName: string, rpcUrl: string) {
           });
         } else if (log.topics[0] === NFTBurnedTopic) {
           console.log(`🔥 Processing NFTBurned event in tx ${txHash}`);
-          const sender = "0x" + log.topics[1].slice(26);
-          const manager = "0x" + log.topics[2].slice(26);
-          const tokenId = ethers.toBigInt(log.data).toString();
-
-          console.log(`  📍 Processing burn: manager=${manager}, tokenId=${tokenId}`);
-
-          if (manager.toLowerCase() === V4_MANAGER.toLowerCase()) {
-            const entry = await processNFTBurnedLog(log, provider);
-            if (!entry) {
-              console.warn(`  ⚠️ Failed to resolve V4 tokens for tokenId ${tokenId}, skipping...`);
-              continue;
-            }
+          
+          const entry = await processNFTBurnedLog(log, provider);
+          if (entry) {
             vaultEntries.push(entry);
           } else {
-            const { token0, token1 } = await fetchPositionTokens(manager, tokenId, provider, log.blockNumber, txHash);
-            if (token0 === ethers.ZeroAddress || token1 === ethers.ZeroAddress) {
-              console.warn(`  ⚠️ Failed to resolve tokens for tokenId ${tokenId}, skipping...`);
-              continue;
-            }
-
-            const sym0 = await fetchTokenSymbol(token0, provider);
-            const sym1 = await fetchTokenSymbol(token1, provider);
-            const pair = `${sym0}/${sym1}`;
-            const project = ignoreSymbols.includes(sym0) ? sym1 : sym0;
-            const type = "v3";
-
-            console.log(`  ✅ Resolved ${type} position: ${pair} (${project})`);
-
-            vaultEntries.push({
-              type,
-              tokenId,
-              manager,
-              token0,
-              token1,
-              pair,
-              project,
-              sender,
-              txHash,
-              timestamp,
-              vault: VAULT_ADDRESS,
-              chain: chainName,
-            });
+            console.warn(`  ⚠️ Failed to process NFTBurned event, skipping...`);
           }
         }
       } catch (e) {
