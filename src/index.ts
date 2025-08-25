@@ -8,10 +8,7 @@ const VAULT_ADDRESS = "0x9be6e6Ea828d5BE4aD1AD4b46d9f704B75052929";
 const V3_MANAGER = "0xC36442b4a4522E871399CD717aBDD847Ab11FE88";
 const V4_MANAGER = "0x7C5f5A4bBd8fD63184577525326123B519429bDc";
 
-// ← vault deployment block
 const START_BLOCK = 33201394;
-
-// default chunk size for event scanning
 const INITIAL_CHUNK = 2000;
 const FALLBACK_CHUNK = 1000;
 const MAX_RETRIES = 3;
@@ -34,45 +31,16 @@ const ETH_SENTINELS = new Set([
   ethers.ZeroAddress.toLowerCase(),
 ]);
 
-// --- CORRECTED V4 ABIs ---
-// The issue is that V4 Position Manager doesn't use the same positions() function as V3
-// Let's try multiple possible V4 patterns based on common implementations
-
-const V4_POSITION_ABIS = [
-  // Pattern 1: Standard ERC721 + metadata
-  [
-    "function tokenURI(uint256 tokenId) view returns (string)",
-    "function ownerOf(uint256 tokenId) view returns (address)"
-  ],
-  // Pattern 2: Position details via different methods
-  [
-    "function getPositionInfo(uint256 tokenId) view returns (address token0, address token1, uint24 fee, int24 tickLower, int24 tickUpper, uint128 liquidity)",
-    "function ownerOf(uint256 tokenId) view returns (address)"
-  ],
-  // Pattern 3: Direct pool access
-  [
-    "function poolKeys(uint256 tokenId) view returns (address currency0, address currency1, uint24 fee, int24 tickSpacing, address hooks)",
-    "function ownerOf(uint256 tokenId) view returns (address)"
-  ],
-  // Pattern 4: Liquidity position data
-  [
-    "function liquidityPositions(uint256 tokenId) view returns (address token0, address token1, uint128 liquidity, int24 tickLower, int24 tickUpper)",
-    "function ownerOf(uint256 tokenId) view returns (address)"
-  ]
-];
-
-const V4_POOLMANAGER_ABI = [
-  "function getPool(address currency0, address currency1, uint24 fee) view returns (address pool)",
-  "function pools(bytes32 poolId) view returns (address currency0, address currency1, uint24 fee, address hooks, int24 tickSpacing)"
-];
-
-// Try multiple potential pool manager addresses
-const POTENTIAL_V4_POOL_MANAGERS = [
-  "0x1631559198a9e474033433b2958dabc135ab6446", // Base fallback
-  "0x38EB8B22Df3Ae7fb21e92881151B365Df14ba967", // Alternative
-  "0x8C4BcBE6b9eF47855f97E675296FA3F6fafa5F1A", // Another potential
-  "0x498581ff718922c3f8e6a244956af099b2652b2b", // From your logs
-];
+// Known common token addresses on Base to help with resolution
+const KNOWN_BASE_TOKENS: Record<string, string> = {
+  "0x4200000000000000000000000000000000000006": "WETH",
+  "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913": "USDC",
+  "0xfde4c96c8593536e31f229ea77223269ed6743e8": "USDT",
+  "0x50c5725949a6f0c72e6c4a641f24049a917db0cb": "DAI",
+  "0x2ae3f1ec7f1f5012cfeab0185bfc7aa3cf0dec22": "cbETH",
+  "0x940181a94a35a4569e4529a3cdfb74e38fd98631": "AERO",
+  "0x0000000000000000000000000000000000000000": "ETH"
+};
 
 // ---------- Robust symbol() with fallbacks + cache ----------
 const SYMBOL_ABI_STRING = ["function symbol() view returns (string)"];
@@ -135,6 +103,12 @@ async function fetchTokenSymbol(address: string, provider: ethers.JsonRpcProvide
   // Handle native ETH sentinel & Base WETH & Zero Address
   if (ETH_SENTINELS.has(addr)) return "ETH";
   if (addr === BASE_WETH.toLowerCase()) return "WETH";
+  if (addr === ethers.ZeroAddress.toLowerCase()) return "ETH";
+
+  // Check known tokens first
+  if (KNOWN_BASE_TOKENS[addr]) {
+    return KNOWN_BASE_TOKENS[addr];
+  }
 
   if (symbolCache.has(addr)) return symbolCache.get(addr)!;
 
@@ -154,126 +128,152 @@ async function fetchTokenSymbol(address: string, provider: ethers.JsonRpcProvide
   return sym;
 }
 
-// Enhanced V4 token resolution with multiple strategies
-async function resolveV4TokensEnhanced(
-  manager: string, 
-  tokenId: string, 
-  provider: ethers.JsonRpcProvider,
-  txHash: string
+// Enhanced transaction analysis specifically for V4 burns
+async function analyzeV4BurnTransaction(
+  txHash: string,
+  tokenId: string,
+  provider: ethers.JsonRpcProvider
 ): Promise<{ token0: string; token1: string }> {
-  console.log(`🔄 Enhanced V4 resolution for tokenId ${tokenId}...`);
+  console.log(`🔍 Deep transaction analysis for V4 tokenId ${tokenId} in tx ${txHash}`);
 
-  // Strategy 1: Try different ABI patterns
-  for (let i = 0; i < V4_POSITION_ABIS.length; i++) {
-    try {
-      console.log(`  📋 Trying ABI pattern ${i + 1}...`);
-      const contract = new ethers.Contract(manager, V4_POSITION_ABIS[i], provider);
-      
-      // Try different function names based on the ABI
-      let result: any;
-      try {
-        if ('getPositionInfo' in contract) {
-          result = await contract.getPositionInfo(tokenId);
-          if (result && result.length >= 2) {
-            return { token0: result[0], token1: result[1] };
-          }
-        }
-        if ('poolKeys' in contract) {
-          result = await contract.poolKeys(tokenId);
-          if (result && result.length >= 2) {
-            return { token0: result[0], token1: result[1] };
-          }
-        }
-        if ('liquidityPositions' in contract) {
-          result = await contract.liquidityPositions(tokenId);
-          if (result && result.length >= 2) {
-            return { token0: result[0], token1: result[1] };
-          }
-        }
-      } catch (e) {
-        console.log(`    ❌ Pattern ${i + 1} failed:`, (e as Error).message);
-      }
-    } catch (e) {
-      console.log(`    ❌ ABI pattern ${i + 1} failed:`, (e as Error).message);
-    }
-  }
-
-  // Strategy 2: Parse transaction receipt for token transfers
-  console.log(`  🔄 Trying transaction receipt analysis...`);
   try {
-    const receipt = await provider.getTransactionReceipt(txHash);
-    const tx = await provider.getTransaction(txHash);
-    const allTokens = new Set<string>();
-    const transferTopic = ethers.id("Transfer(address,address,uint256)");
+    const [receipt, tx] = await Promise.all([
+      provider.getTransactionReceipt(txHash),
+      provider.getTransaction(txHash)
+    ]);
 
-    // Check for native ETH transfer
+    const detectedTokens = new Set<string>();
+    const transferTopic = ethers.id("Transfer(address,address,uint256)");
+    const decreaseLiquidityTopic = ethers.id("DecreaseLiquidity(uint256,uint128,uint256,uint256)");
+    const collectTopic = ethers.id("Collect(uint256,address,uint256,uint256)");
+
+    // Strategy 1: Check for native ETH value
     if (tx.value && tx.value > 0n) {
-      allTokens.add("0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee");
-      console.log(`    ℹ️ Detected native ETH transfer: value=${ethers.formatEther(tx.value)}`);
+      detectedTokens.add(ethers.ZeroAddress);
+      console.log(`  ✅ Native ETH detected: ${ethers.formatEther(tx.value)}`);
     }
 
-    // Collect ERC20 transfers
-    for (const txLog of receipt.logs) {
-      if (txLog.topics[0] === transferTopic && txLog.topics.length === 3) {
-        const tokenAddr = txLog.address.toLowerCase();
-        const from = "0x" + txLog.topics[1].slice(26).toLowerCase();
-        const to = "0x" + txLog.topics[2].slice(26).toLowerCase();
+    // Strategy 2: Analyze all Transfer events involving meaningful amounts
+    const transferLogs = receipt.logs.filter(log => 
+      log.topics[0] === transferTopic && 
+      log.topics.length === 3 &&
+      log.data !== "0x" // Has amount data
+    );
 
-        // Look for transfers involving the vault or user
-        if (
-          tokenAddr !== VAULT_ADDRESS.toLowerCase() &&
-          tokenAddr !== manager.toLowerCase() &&
-          ethers.isAddress(tokenAddr) &&
-          (from === VAULT_ADDRESS.toLowerCase() || to === VAULT_ADDRESS.toLowerCase())
-        ) {
-          allTokens.add(tokenAddr);
-          console.log(`    ℹ️ Found token transfer: ${tokenAddr}`);
+    for (const log of transferLogs) {
+      const tokenAddr = log.address.toLowerCase();
+      const from = "0x" + log.topics[1].slice(26).toLowerCase();
+      const to = "0x" + log.topics[2].slice(26).toLowerCase();
+      
+      // Parse amount to filter out dust/spam tokens
+      let amount = 0n;
+      try {
+        amount = ethers.toBigInt(log.data);
+      } catch {}
+
+      // Include tokens with meaningful transfers (> 0 and reasonable size)
+      if (
+        amount > 0n &&
+        amount < ethers.parseEther("1000000000") && // Reasonable upper bound
+        tokenAddr !== VAULT_ADDRESS.toLowerCase() &&
+        tokenAddr !== V4_MANAGER.toLowerCase() &&
+        ethers.isAddress(tokenAddr) &&
+        // Must involve the vault or user in some way
+        (from === VAULT_ADDRESS.toLowerCase() || 
+         to === VAULT_ADDRESS.toLowerCase() ||
+         // Or be part of the position closure/burn process
+         from === V4_MANAGER.toLowerCase() ||
+         to === V4_MANAGER.toLowerCase())
+      ) {
+        detectedTokens.add(tokenAddr);
+        console.log(`  ✅ Token transfer detected: ${tokenAddr} amount: ${amount.toString()}`);
+      }
+    }
+
+    // Strategy 3: Look for DecreaseLiquidity events (position closure)
+    const decreaseLogs = receipt.logs.filter(log => log.topics[0] === decreaseLiquidityTopic);
+    if (decreaseLogs.length > 0) {
+      console.log(`  ✅ Found DecreaseLiquidity events: ${decreaseLogs.length}`);
+      
+      // Try to find associated token transfers right after decrease
+      for (const decreaseLog of decreaseLogs) {
+        const logIndex = receipt.logs.indexOf(decreaseLog);
+        const nextLogs = receipt.logs.slice(logIndex + 1, logIndex + 10); // Check next few logs
+        
+        for (const nextLog of nextLogs) {
+          if (nextLog.topics[0] === transferTopic && nextLog.topics.length === 3) {
+            const tokenAddr = nextLog.address.toLowerCase();
+            if (ethers.isAddress(tokenAddr) && 
+                tokenAddr !== VAULT_ADDRESS.toLowerCase() &&
+                tokenAddr !== V4_MANAGER.toLowerCase()) {
+              detectedTokens.add(tokenAddr);
+              console.log(`  ✅ Post-decrease token: ${tokenAddr}`);
+            }
+          }
         }
       }
     }
 
-    const tokenList = Array.from(allTokens).sort();
+    // Strategy 4: Check input data for encoded token addresses
+    if (tx.data && tx.data.length > 10) {
+      const inputData = tx.data;
+      console.log(`  🔍 Analyzing transaction input data...`);
+      
+      // Look for 20-byte patterns that might be addresses
+      for (let i = 0; i < inputData.length - 40; i += 2) {
+        const potential = inputData.slice(i, i + 42);
+        if (potential.length === 42 && potential.startsWith('0x')) {
+          try {
+            if (ethers.isAddress(potential)) {
+              const addr = potential.toLowerCase();
+              // Check if this looks like a token (has symbol/name functions)
+              try {
+                const testContract = new ethers.Contract(addr, SYMBOL_ABI_STRING, provider);
+                await testContract.symbol();
+                if (addr !== VAULT_ADDRESS.toLowerCase() && 
+                    addr !== V4_MANAGER.toLowerCase()) {
+                  detectedTokens.add(addr);
+                  console.log(`  ✅ Input data token: ${addr}`);
+                }
+              } catch {
+                // Not a token, continue
+              }
+            }
+          } catch {}
+        }
+      }
+    }
+
+    // Convert to sorted array
+    const tokenList = Array.from(detectedTokens).sort();
+    
+    // Return the best pair we can find
     if (tokenList.length >= 2) {
-      console.log(`    ✅ Receipt resolved: ${tokenList[0]}, ${tokenList[1]}`);
+      console.log(`  ✅ Multi-token resolution: ${tokenList[0]}, ${tokenList[1]}`);
       return { token0: tokenList[0], token1: tokenList[1] };
     } else if (tokenList.length === 1) {
-      // Assume pair with WETH
-      const token0 = tokenList[0];
-      const token1 = BASE_WETH.toLowerCase();
-      const sorted = token0 < token1 ? { token0, token1 } : { token0: token1, token1: token0 };
-      console.log(`    ✅ Receipt resolved single token with WETH: ${sorted.token0}, ${sorted.token1}`);
+      // Pair with WETH as fallback
+      const token = tokenList[0];
+      const weth = BASE_WETH.toLowerCase();
+      const sorted = token < weth ? { token0: token, token1: weth } : { token0: weth, token1: token };
+      console.log(`  ✅ Single token + WETH: ${sorted.token0}, ${sorted.token1}`);
       return sorted;
     }
-  } catch (e) {
-    console.log(`    ❌ Receipt analysis failed:`, (e as Error).message);
-  }
 
-  // Strategy 3: Try to parse tokenURI if available (some V4 implementations encode metadata)
-  console.log(`  🔄 Trying tokenURI metadata parsing...`);
-  try {
-    const contract = new ethers.Contract(manager, ["function tokenURI(uint256) view returns (string)"], provider);
-    const uri = await contract.tokenURI(tokenId);
-    
-    if (uri && uri.startsWith('data:application/json')) {
-      const jsonStr = uri.replace('data:application/json,', '');
-      const metadata = JSON.parse(decodeURIComponent(jsonStr));
-      
-      // Look for token addresses in metadata
-      if (metadata.attributes) {
-        const token0Attr = metadata.attributes.find((attr: any) => attr.trait_type === 'Token 0' || attr.trait_type === 'token0');
-        const token1Attr = metadata.attributes.find((attr: any) => attr.trait_type === 'Token 1' || attr.trait_type === 'token1');
-        
-        if (token0Attr && token1Attr && ethers.isAddress(token0Attr.value) && ethers.isAddress(token1Attr.value)) {
-          console.log(`    ✅ URI metadata resolved: ${token0Attr.value}, ${token1Attr.value}`);
-          return { token0: token0Attr.value.toLowerCase(), token1: token1Attr.value.toLowerCase() };
-        }
-      }
+    // Final fallback - if we found ETH transfers, assume ETH/WETH pair
+    if (tx.value && tx.value > 0n) {
+      console.log(`  ✅ Fallback to ETH/WETH pair`);
+      return { 
+        token0: ethers.ZeroAddress, 
+        token1: BASE_WETH.toLowerCase()
+      };
     }
-  } catch (e) {
-    console.log(`    ❌ URI parsing failed:`, (e as Error).message);
+
+  } catch (error) {
+    console.error(`  ❌ Transaction analysis failed:`, (error as Error).message);
   }
 
-  console.log(`    ⚠️ All V4 resolution strategies failed for tokenId ${tokenId}`);
+  console.log(`  ⚠️ Could not determine tokens from transaction analysis`);
   return { token0: ethers.ZeroAddress, token1: ethers.ZeroAddress };
 }
 
@@ -292,10 +292,9 @@ async function processNFTBurnedLog(log: any, provider: ethers.JsonRpcProvider) {
   let token0 = ethers.ZeroAddress;
   let token1 = ethers.ZeroAddress;
 
-  // Step 1: Resolve tokens based on manager type
   if (manager.toLowerCase() === V4_MANAGER.toLowerCase()) {
-    console.log(`  🔄 V4 position detected, using enhanced resolution...`);
-    const result = await resolveV4TokensEnhanced(manager, tokenId, provider, txHash);
+    console.log(`  🔄 V4 position detected, using transaction analysis...`);
+    const result = await analyzeV4BurnTransaction(txHash, tokenId, provider);
     token0 = result.token0;
     token1 = result.token1;
   } else {
