@@ -106,6 +106,19 @@
 		"anonymous": false,
 		"inputs": [
 			{
+				"indexed": false,
+				"internalType": "uint256",
+				"name": "newCooldown",
+				"type": "uint256"
+			}
+		],
+		"name": "ClaimCooldownUpdated",
+		"type": "event"
+	},
+	{
+		"anonymous": false,
+		"inputs": [
+			{
 				"indexed": true,
 				"internalType": "address",
 				"name": "nft",
@@ -282,37 +295,6 @@
 			{
 				"indexed": true,
 				"internalType": "address",
-				"name": "nft",
-				"type": "address"
-			},
-			{
-				"indexed": false,
-				"internalType": "uint256",
-				"name": "tokenId",
-				"type": "uint256"
-			},
-			{
-				"indexed": false,
-				"internalType": "uint256",
-				"name": "newTokenId",
-				"type": "uint256"
-			}
-		],
-		"name": "MigrationInitiated",
-		"type": "event"
-	},
-	{
-		"anonymous": false,
-		"inputs": [
-			{
-				"indexed": true,
-				"internalType": "address",
-				"name": "user",
-				"type": "address"
-			},
-			{
-				"indexed": true,
-				"internalType": "address",
 				"name": "nftContract",
 				"type": "address"
 			},
@@ -428,6 +410,19 @@
 		"inputs": [
 			{
 				"internalType": "uint256",
+				"name": "newCooldown",
+				"type": "uint256"
+			}
+		],
+		"name": "setClaimCooldown",
+		"outputs": [],
+		"stateMutability": "nonpayable",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{
+				"internalType": "uint256",
 				"name": "newFee",
 				"type": "uint256"
 			}
@@ -525,6 +520,26 @@
 				"internalType": "bool",
 				"name": "claimed",
 				"type": "bool"
+			},
+			{
+				"internalType": "address",
+				"name": "token0",
+				"type": "address"
+			},
+			{
+				"internalType": "address",
+				"name": "token1",
+				"type": "address"
+			},
+			{
+				"internalType": "string",
+				"name": "token0Name",
+				"type": "string"
+			},
+			{
+				"internalType": "string",
+				"name": "token1Name",
+				"type": "string"
 			}
 		],
 		"stateMutability": "view",
@@ -604,6 +619,45 @@
 				"internalType": "uint256",
 				"name": "amount1",
 				"type": "uint256"
+			}
+		],
+		"stateMutability": "view",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{
+				"internalType": "address",
+				"name": "nft",
+				"type": "address"
+			},
+			{
+				"internalType": "uint256",
+				"name": "tokenId",
+				"type": "uint256"
+			}
+		],
+		"name": "getBurnedPositionTokens",
+		"outputs": [
+			{
+				"internalType": "address",
+				"name": "token0",
+				"type": "address"
+			},
+			{
+				"internalType": "address",
+				"name": "token1",
+				"type": "address"
+			},
+			{
+				"internalType": "string",
+				"name": "token0Name",
+				"type": "string"
+			},
+			{
+				"internalType": "string",
+				"name": "token1Name",
+				"type": "string"
 			}
 		],
 		"stateMutability": "view",
