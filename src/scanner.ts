@@ -6,7 +6,7 @@ import path from "path";
 const RPC_URL = process.env.RPC_URL!;
 const provider = new ethers.JsonRpcProvider(RPC_URL);
 
-const VAULT = "0x9be6e6Ea828d5BE4aD1AD4b46d9f704B75052929";
+const VAULT = "0x37307B774598E5DB1887624Bafbfe4ACdf693b5D";
 const START_BLOCK = 33201418; // Vault deploy block
 const CHUNK_SIZE = 2000; // Small block chunks to avoid RPC limit
 const CHAIN = "base";
